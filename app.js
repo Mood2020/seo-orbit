@@ -8,6 +8,8 @@
   const state = { latest: null, currentUrl: "", activeRun: null };
   const psiKeyStorage = "orbit-pagespeed-key";
   const backendStorage = "orbit-api-url-v2";
+  const integrationStorage = { gsc: "orbit-gsc-property", ga4: "orbit-ga4-property", rank: "orbit-rank-endpoint", backlink: "orbit-backlink-endpoint" };
+  const monitorStorage = "orbit-monitor-v1";
   const defaultBackendUrl = "https://orbit-seo-api.newtazn.workers.dev";
   const getPsiKey = () => localStorage.getItem(psiKeyStorage) || "";
   const getBackendUrl = () => (localStorage.getItem(backendStorage) || defaultBackendUrl).trim().replace(/\/$/, "");
@@ -91,7 +93,7 @@
         }
         const text = await response.text();
         if (!text.trim()) { errors.push(`${source}:empty`); continue; }
-        return { url, text, ms: Math.round(performance.now() - started), status: response.status, source };
+        return { url, text, ms: Math.round(performance.now() - started), status: response.status, source, finalUrl: response.headers.get("X-Orbit-Final-Url") || (source === "direct" ? response.url : url), redirected: response.headers.get("X-Orbit-Redirected") === "true" || (source === "direct" && response.redirected) };
       } catch (error) { errors.push(`${source}:${error.name === "AbortError" ? "timeout" : error.message}`); }
     }
     throw new Error(`دریافت ${url} ناموفق بود (${errors.join(" | ")})${getBackendUrl() ? "" : "؛ برای تحلیل پایدار، آدرس backend را در تنظیمات وارد کن."}`);
@@ -104,6 +106,13 @@
     try { data = JSON.parse(body); } catch { data = null; }
     if (!response.ok) throw new Error(data?.error?.message || `API با وضعیت ${response.status} پاسخ داد`);
     return data || {};
+  };
+
+  const probeUrl = async url => {
+    const endpoint = backendEndpoint("/api/probe", { url });
+    if (!endpoint) return { url, status: null, ok: null, finalUrl: url, redirected: false, error: "backend تنظیم نشده است" };
+    try { return await fetchJson(endpoint); }
+    catch (error) { return { url, status: null, ok: null, finalUrl: url, redirected: false, unavailable: /مسیر API پیدا نشد|not_found/i.test(error.message), error: error.message }; }
   };
 
   const pageSpeedUrl = (url, strategy) => {
@@ -156,17 +165,20 @@
     const origin = new URL(pageUrl).origin;
     const internal = new Set();
     const external = new Set();
+    const internalDetails = new Map();
+    const externalDetails = new Map();
     [...doc.querySelectorAll("a[href]")].forEach(node => {
       try {
         const target = new URL(node.getAttribute("href"), pageUrl);
         target.hash = "";
         const url = target.toString().replace(/\/$/, "");
         if (!/^https?:$/i.test(target.protocol)) return;
-        if (target.origin === origin && isHtmlCandidate(url)) internal.add(url);
-        else if (target.origin !== origin) external.add(url);
+        const detail = { url, text: node.textContent.trim().replace(/\s+/g, " ").slice(0, 160), nofollow: /nofollow/i.test(node.getAttribute("rel") || "") };
+        if (target.origin === origin && isHtmlCandidate(url)) { internal.add(url); internalDetails.set(url, detail); }
+        else if (target.origin !== origin) { external.add(url); externalDetails.set(url, detail); }
       } catch { /* Ignore malformed href values. */ }
     });
-    return { internal: [...internal], external: [...external] };
+    return { internal: [...internal], external: [...external], internalDetails: [...internalDetails.values()], externalDetails: [...externalDetails.values()] };
   };
 
   const discoverLinks = (html, pageUrl) => extractLinks(html, pageUrl).internal;
@@ -212,8 +224,11 @@
     const viewport = Boolean(doc.querySelector('meta[name="viewport"]'));
     const lang = doc.documentElement.lang || "";
     const words = (doc.body?.innerText || "").trim().split(/\s+/).filter(Boolean).length;
-    const schema = [...doc.querySelectorAll('script[type="application/ld+json"]')].length;
+    const schemaNodes = [...doc.querySelectorAll('script[type="application/ld+json"]')];
+    const schema = schemaNodes.length;
+    const schemaErrors = schemaNodes.filter(node => { try { JSON.parse(node.textContent || ""); return false; } catch { return true; } }).length;
     const structuredData = jsonLd(doc);
+    const schemaTypes = [...new Set(structuredData.flatMap(item => Array.isArray(item["@type"]) ? item["@type"] : [item["@type"]]).filter(Boolean).map(type => String(type)))];
     const articleSchema = structuredData.find(item => {
       const types = Array.isArray(item["@type"]) ? item["@type"] : [item["@type"]];
       return types.some(type => articleTypes.has(String(type || "").toLowerCase()));
@@ -229,6 +244,8 @@
     const articleTitle = schemaValue(articleSchema?.headline || articleSchema?.name, h1[0] || title);
     const articleReason = articleSchema ? "JSON-LD Article" : articlePublished ? "article metadata" : articleNode ? "semantic article" : articlePath ? "article URL pattern" : "";
     const articleConfidence = articleSchema || articlePublished ? "high" : articleNode ? "medium" : isArticle ? "low" : "";
+    const modernImageRate = images.length ? Math.round(images.filter(image => /\.(?:avif|webp)(?:$|\?)/i.test(image.currentSrc || image.src || image.getAttribute("src") || "") || image.getAttribute("type") === "image/webp").length / images.length * 100) : 100;
+    const lazyImageRate = images.length ? Math.round(images.filter(image => image.loading === "lazy" || image.hasAttribute("loading")).length / images.length * 100) : 100;
     const openGraph = ["og:title", "og:description", "og:image"].filter(name => doc.querySelector(`meta[property="${name}"]`)).length;
     const canonicalOk = !canonical || new URL(canonical, url).origin === new URL(url).origin;
     const technicalChecks = [
@@ -251,7 +268,7 @@
       check("og", "Open Graph", openGraph >= 2, `${fa(openGraph)} مورد از ۳ مورد اصلی`, 8)
     ];
     const score = checks => Math.round(checks.reduce((sum, item) => sum + (item.passed ? item.weight : 0), 0) / checks.reduce((sum, item) => sum + item.weight, 0) * 100);
-    return { url, title, description, h1, headings, words, images: images.length, noAlt, imageAltRate, internalLinks, internalUrls: links.internal, externalLinks: links.external.length, canonical, robots, viewport, lang, schema, openGraph, article: isArticle, articleTitle, publishedAt: articlePublished, author: articleAuthor, section: articleSection, articleType, articleWords: isArticle ? articleWords : 0, articleConfidence, articleReason, depth: meta.depth || 0, inboundLinks: 0, orphan: false, technicalScore: score(technicalChecks), contentScore: score(contentChecks), technicalChecks, contentChecks, ms: meta.ms || 0 };
+    return { url, requestedUrl: url, finalUrl: meta.finalUrl || url, redirected: Boolean(meta.redirected), status: meta.status || 200, title, description, h1, headings, words, images: images.length, noAlt, imageAltRate, modernImageRate, lazyImageRate, internalLinks, internalUrls: links.internal, internalAnchors: links.internalDetails, externalLinks: links.external.length, externalUrls: links.external, externalAnchors: links.externalDetails, canonical, robots, viewport, lang, schema, schemaErrors, schemaTypes, openGraph, article: isArticle, articleTitle, publishedAt: articlePublished, author: articleAuthor, section: articleSection, articleType, articleWords: isArticle ? articleWords : 0, articleConfidence, articleReason, depth: meta.depth || 0, inboundLinks: 0, orphan: false, technicalScore: score(technicalChecks), contentScore: score(contentChecks), technicalChecks, contentChecks, ms: meta.ms || 0 };
   };
 
   const reportProgress = (message, current = 0, total = 1) => {
@@ -337,6 +354,9 @@
       });
     }
     const validPages = pages.filter(page => !page.error);
+    const crawledUrls = new Set(pages.map(page => page.url));
+    const linkCandidates = [...new Set(validPages.flatMap(page => page.internalUrls || []).filter(url => !crawledUrls.has(url)))].slice(0, Math.min(200, Math.max(50, limit)));
+    const linkAudit = linkCandidates.length && getBackendUrl() ? await concurrency(linkCandidates, url => probeUrl(url), 5) : [];
     const inbound = new Map();
     validPages.forEach(page => (page.internalUrls || []).forEach(url => inbound.set(url, (inbound.get(url) || 0) + 1)));
     validPages.forEach(page => {
@@ -344,6 +364,14 @@
       page.orphan = page.url !== baseUrl && page.inboundLinks === 0;
       if (page.orphan) page.technicalChecks.push(check("orphan", "صفحه یتیم", false, "صفحه در sitemap یا نتایج crawl پیدا شد اما لینک داخلی ورودی ندارد", 8));
     });
+    const linkOpportunities = validPages.filter(page => !page.error && page.inboundLinks <= 1).flatMap(target => {
+      const targetTokens = new Set(keywordTokens(`${target.title} ${target.h1?.[0] || ""}`));
+      return validPages.filter(source => source.url !== target.url && source.internalUrls?.includes(target.url) === false).map(source => {
+        const sourceTokens = new Set(keywordTokens(`${source.title} ${source.h1?.[0] || ""}`));
+        const overlap = [...targetTokens].filter(token => sourceTokens.has(token)).length;
+        return overlap >= 2 ? { sourceUrl: source.url, sourceTitle: source.title, targetUrl: target.url, targetTitle: target.title, overlap } : null;
+      }).filter(Boolean).sort((a, b) => b.overlap - a.overlap).slice(0, 3);
+    }).flat().slice(0, 30);
     const duplicateChecks = [
       ["title", "عنوان تکراری", "title تکراری با صفحات دیگر", 8],
       ["description", "توضیحات متای تکراری", "توضیحات متا با صفحات دیگر یکسان است", 6],
@@ -385,6 +413,23 @@
         pages: [...(previous?.pages || []), page.url]
       });
     });
+    if (linkAudit.some(item => !item.unavailable && (item.ok === false || !item.status))) {
+      const broken = linkAudit.filter(item => !item.unavailable && (item.ok === false || !item.status));
+      grouped.set("broken-link", { id: "broken-link", label: "لینک‌های شکسته یا غیرقابل بررسی", passed: false, detail: `${fa(broken.length)} URL داخلی خارج از سقف crawl با probe بررسی شد`, weight: 13, severity: "critical", count: broken.length, pages: broken.map(item => item.url) });
+    }
+    if (validPages.some(page => page.redirected || page.finalUrl !== page.url)) {
+      const redirects = validPages.filter(page => page.redirected || page.finalUrl !== page.url);
+      grouped.set("redirect", { id: "redirect", label: "redirect در مسیر صفحات", passed: false, detail: `${fa(redirects.length)} URL با مقصد نهایی متفاوت دریافت شد`, weight: 6, severity: "warning", count: redirects.length, pages: redirects.map(page => page.url) });
+    }
+    if (validPages.some(page => page.noAlt > 0)) {
+      const imagePages = validPages.filter(page => page.noAlt > 0);
+      grouped.set("image-alt", { id: "image-alt", label: "تصاویر بدون متن جایگزین", passed: false, detail: `${fa(imagePages.reduce((sum, page) => sum + page.noAlt, 0))} تصویر alt کامل ندارند`, weight: 7, severity: "warning", count: imagePages.length, pages: imagePages.map(page => page.url) });
+    }
+    if (validPages.some(page => page.schemaErrors > 0)) {
+      const schemaPages = validPages.filter(page => page.schemaErrors > 0);
+      grouped.set("schema-error", { id: "schema-error", label: "JSON-LD نامعتبر", passed: false, detail: `${fa(schemaPages.reduce((sum, page) => sum + page.schemaErrors, 0))} بلوک Schema قابل parse نیست`, weight: 9, severity: "critical", count: schemaPages.length, pages: schemaPages.map(page => page.url) });
+    }
+    if (linkOpportunities.length) grouped.set("internal-link-opportunity", { id: "internal-link-opportunity", label: "فرصت لینک‌سازی داخلی", passed: false, detail: `${fa(linkOpportunities.length)} ارتباط موضوعی بین صفحات پیدا شد`, weight: 4, severity: "warning", count: linkOpportunities.length, pages: linkOpportunities.map(item => item.targetUrl) });
     [...grouped.values()].sort((a, b) => b.weight * b.count - a.weight * a.count).forEach(item => issues.push(item));
     const avg = key => validPages.length ? Math.round(validPages.reduce((sum, page) => sum + (page[key] || 0), 0) / validPages.length) : null;
     return {
@@ -408,6 +453,14 @@
       articles: validPages.filter(page => page.article),
       articleCount: validPages.filter(page => page.article).length,
       articleWords: validPages.reduce((sum, page) => sum + (page.article ? page.articleWords : 0), 0),
+      redirects: validPages.filter(page => page.redirected || page.finalUrl !== page.url).map(page => ({ url: page.url, finalUrl: page.finalUrl, status: page.status })),
+      redirectCount: validPages.filter(page => page.redirected || page.finalUrl !== page.url).length,
+      linkAudit,
+      brokenLinks: linkAudit.filter(item => !item.unavailable && (item.ok === false || !item.status)),
+      brokenLinkCount: linkAudit.filter(item => !item.unavailable && (item.ok === false || !item.status)).length,
+      linkOpportunities,
+      imageAudit: { missingAlt: validPages.reduce((sum, page) => sum + page.noAlt, 0), modernRate: validPages.length ? Math.round(validPages.reduce((sum, page) => sum + page.modernImageRate, 0) / validPages.length) : null, lazyRate: validPages.length ? Math.round(validPages.reduce((sum, page) => sum + page.lazyImageRate, 0) / validPages.length) : null },
+      schemaAudit: { blocks: validPages.reduce((sum, page) => sum + page.schema, 0), errors: validPages.reduce((sum, page) => sum + page.schemaErrors, 0), types: [...new Set(validPages.flatMap(page => page.schemaTypes))] },
       root: rootPage
     };
   };
@@ -448,8 +501,39 @@
     body.innerHTML = history.slice(0, 8).map((item, index) => {
       const host = new URL(item.url).hostname.replace(/^www\./, "");
       const date = new Date(item.checkedAt).toLocaleString("fa-IR", { dateStyle: "short", timeStyle: "short" });
-      return `<tr><td><span class="site-favicon ${["orange-bg", "violet-bg", "blue-bg"][index % 3]}">${esc(host[0].toUpperCase())}</span><b>${esc(host)}</b></td><td>${date}</td><td><strong class="table-score">${item.score == null ? "—" : fa(item.score)}</strong></td><td><span class="trend neutral">تحلیل واقعی</span></td><td><span class="status-tag success">${item.partial ? "ناقص" : "کامل"}</span></td><td><button class="row-menu" data-history-url="${esc(item.url)}">↻</button></td></tr>`;
+      const delta = Number.isFinite(item.delta) ? `${item.delta > 0 ? "↗" : item.delta < 0 ? "↘" : "→"} ${fa(Math.abs(item.delta))}` : "اولین snapshot";
+      return `<tr><td><span class="site-favicon ${["orange-bg", "violet-bg", "blue-bg"][index % 3]}">${esc(host[0].toUpperCase())}</span><b>${esc(host)}</b></td><td>${date}</td><td><strong class="table-score">${item.score == null ? "—" : fa(item.score)}</strong></td><td><span class="trend ${item.delta > 0 ? "up" : item.delta < 0 ? "down" : "neutral"}">${delta}</span></td><td><span class="status-tag success">${item.partial ? "ناقص" : "کامل"}</span></td><td><button class="row-menu" data-history-url="${esc(item.url)}">↻</button></td></tr>`;
     }).join("");
+  };
+
+  const renderHistoryChart = (history, url) => {
+    const chart = $(".chart-wrap");
+    if (!chart) return;
+    const points = history.filter(item => item.url === url && Number.isFinite(item.score)).slice(0, 10).reverse();
+    if (points.length < 2) {
+      chart.innerHTML = `<div class="data-empty chart-empty"><b>روند تاریخی بعد از تحلیل بعدی ساخته می‌شود.</b><small>برای ${esc(new URL(url).hostname)} حداقل دو snapshot واقعی لازم است.</small></div>`;
+      $(".legend")?.replaceChildren();
+      return;
+    }
+    const width = 680;
+    const height = 220;
+    const x = index => points.length === 1 ? width / 2 : index * width / (points.length - 1);
+    const y = score => height - Math.max(0, Math.min(100, score)) / 100 * height;
+    const line = points.map((item, index) => `${x(index)},${y(item.score)}`).join(" ");
+    const area = `${line} ${width},${height} 0,${height}`;
+    chart.innerHTML = `<div class="chart-y"><span>۱۰۰</span><span>۷۵</span><span>۵۰</span><span>۲۵</span><span>۰</span></div><svg class="trend-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="روند واقعی امتیاز سلامت"><defs><linearGradient id="historyFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#5e8dff" stop-opacity=".28"/><stop offset="1" stop-color="#5e8dff" stop-opacity="0"/></linearGradient></defs><g class="grid-lines"><path d="M0 12H680M0 60H680M0 108H680M0 156H680M0 204H680"/></g><polygon class="area-line" points="${area}" fill="url(#historyFill)"/><polyline class="main-line" points="${line}" fill="none"/><g class="chart-dots">${points.map((item, index) => `<circle cx="${x(index)}" cy="${y(item.score)}" r="5"><title>${esc(new Date(item.checkedAt).toLocaleString("fa-IR"))}: ${fa(item.score)}</title></circle>`).join("")}</g></svg><div class="chart-x">${points.map(item => `<span>${esc(new Date(item.checkedAt).toLocaleDateString("fa-IR"))}</span>`).join("")}</div>`;
+    $(".legend")?.replaceChildren(Object.assign(document.createElement("span"), { innerHTML: '<i class="legend-line"></i>امتیاز واقعی' }));
+  };
+
+  const notifyMonitor = (report, previous) => {
+    const config = JSON.parse(localStorage.getItem(monitorStorage) || "{}");
+    if (!config.enabled || !previous) return;
+    const scoreDrop = Number.isFinite(previous.score) && Number.isFinite(report.overall) && report.overall - previous.score <= -(config.threshold || 5);
+    const issueIncrease = Number.isFinite(previous.issues) && report.issues.length > previous.issues;
+    if (!scoreDrop && !issueIncrease) return;
+    const message = scoreDrop ? `امتیاز ${report.overall - previous.score} نسبت به snapshot قبل افت کرده است.` : `${report.issues.length - previous.issues} مشکل جدید ثبت شد.`;
+    toast(`هشدار monitoring: ${message}`, "error");
+    if ("Notification" in window && Notification.permission === "granted") new Notification("Orbit SEO", { body: message });
   };
 
   const renderTechnical = report => {
@@ -473,6 +557,26 @@
       $(".audit-card small", card).textContent = cardData[index][1];
       $(".audit-card > strong", card).textContent = value == null ? "—" : fa(value);
     });
+    let advanced = $(".advanced-audit-panel");
+    if (!advanced) {
+      $(".audit-table-panel")?.insertAdjacentHTML("afterend", `<article class="panel advanced-audit-panel"></article>`);
+      advanced = $(".advanced-audit-panel");
+    }
+    if (advanced) {
+      const cards = [
+        ["لینک شکسته", report.brokenLinkCount, "از probe واقعی backend"],
+        ["redirect", report.redirectCount, "URL با مقصد متفاوت"],
+        ["تصویر بدون alt", report.imageAudit?.missingAlt || 0, "تصویر ثبت‌شده"],
+        ["Schema نامعتبر", report.schemaAudit?.errors || 0, "بلوک JSON-LD"]
+      ];
+      const brokenRows = (report.brokenLinks || []).slice(0, 6).map(item => `<div class="audit-detail-row"><b>${esc(item.url)}</b><span>${esc(item.error || item.status || "بدون پاسخ")}</span></div>`).join("");
+      const redirectRows = (report.redirects || []).slice(0, 6).map(item => `<div class="audit-detail-row"><b>${esc(item.url)}</b><span>→ ${esc(item.finalUrl)}</span></div>`).join("");
+      const opportunityRows = (report.linkOpportunities || []).slice(0, 6).map(item => `<div class="audit-detail-row"><b>${esc(item.sourceTitle || item.sourceUrl)}</b><span>→ ${esc(item.targetTitle || item.targetUrl)}</span></div>`).join("");
+      const probeItems = report.linkAudit || [];
+      const availableProbes = probeItems.filter(item => !item.unavailable).length;
+      const probeNote = probeItems.some(item => item.unavailable) ? "endpoint probe در backend فعلی فعال نیست" : `${fa(availableProbes)} لینک probe شد`;
+      advanced.innerHTML = `<div class="panel-heading"><div><h3>ممیزی پیشرفته لینک و محتوا</h3><p>فقط یافته‌های استخراج‌شده از صفحات و probeهای واقعی</p></div><span class="article-note">${esc(probeNote)}</span></div><div class="advanced-audit-cards">${cards.map(card => `<div><b>${esc(card[0])}</b><strong>${fa(card[1])}</strong><small>${esc(card[2])}</small></div>`).join("")}</div><div class="advanced-audit-columns"><div><h4>لینک‌های شکسته</h4>${brokenRows || `<div class="audit-empty">لینک شکسته‌ای در probeهای انجام‌شده ثبت نشد.</div>`}</div><div><h4>redirectها</h4>${redirectRows || `<div class="audit-empty">redirectی در صفحات دریافت‌شده ثبت نشد.</div>`}</div><div><h4>پیشنهاد لینک داخلی</h4>${opportunityRows || `<div class="audit-empty">پیشنهاد کافی از همپوشانی عنوان‌ها پیدا نشد.</div>`}</div></div><div class="audit-footnote">Schema: ${report.schemaAudit?.types?.length ? esc(report.schemaAudit.types.join(" · ")) : "نوعی ثبت نشده است"} · تصاویر مدرن: ${report.imageAudit?.modernRate == null ? "—" : `${fa(report.imageAudit.modernRate)}٪`}</div>`;
+    }
     const list = $(".full-issue-list");
     $(".filter-pills").innerHTML = `<button class="active" data-issue-filter="all">همه <b>${fa(report.issues.length)}</b></button><button data-issue-filter="critical">بحرانی <b>${fa(report.issues.filter(issue => issue.severity === "critical").length)}</b></button><button data-issue-filter="warning">هشدار <b>${fa(report.issues.filter(issue => issue.severity !== "critical").length)}</b></button>`;
     list.innerHTML = report.issues.length ? report.issues.slice(0, 12).map((issue, index) => `<div class="full-issue"><span class="issue-status ${issue.severity === "critical" ? "red" : "orange"}">${issue.severity === "critical" ? "!" : "i"}</span><div><b>${esc(issue.label)}</b><small>${fa(issue.count)} صفحه · ${esc(issue.detail)}</small></div><span class="impact ${issue.severity === "critical" ? "high-impact" : "medium-impact"}">${issue.severity === "critical" ? "اثر زیاد" : "هشدار"}</span><button data-issue-id="${esc(issue.id)}">جزئیات ←</button></div>`).join("") : `<div class="data-empty"><b>مسئله‌ای در چک‌های فنی ثبت نشد.</b><small>این نتیجه فقط بر اساس صفحات دریافت‌شده است.</small></div>`;
@@ -546,11 +650,22 @@
     renderContent(report);
     renderArticles(report);
     renderPerformance(report);
-    const history = JSON.parse(localStorage.getItem("orbit-history-v2") || "[]").filter(item => item.url !== report.url);
-    history.unshift({ url: report.url, score: report.overall, checkedAt: report.checkedAt, partial: Boolean(report.failedPages) });
-    localStorage.setItem("orbit-history-v2", JSON.stringify(history.slice(0, 10)));
+    const history = JSON.parse(localStorage.getItem("orbit-history-v2") || "[]");
+    const previous = history.find(item => item.url === report.url && Number.isFinite(item.score));
+    const currentHistory = history.slice();
+    currentHistory.unshift({ url: report.url, score: report.overall, issues: report.issues.length, delta: Number.isFinite(previous?.score) && Number.isFinite(report.overall) ? report.overall - previous.score : null, checkedAt: report.checkedAt, partial: Boolean(report.failedPages) });
+    const savedHistory = currentHistory.slice(0, 20);
+    localStorage.setItem("orbit-history-v2", JSON.stringify(savedHistory));
     localStorage.setItem("orbit-last-report-v2", JSON.stringify(report));
     renderHistory();
+    renderHistoryChart(savedHistory, report.url);
+    notifyMonitor(report, previous);
+    if (Number.isFinite(previous?.score) && Number.isFinite(report.overall)) {
+      const delta = report.overall - previous.score;
+      $(".score-card .trend").textContent = `${delta > 0 ? "↗" : delta < 0 ? "↘" : "→"} ${fa(Math.abs(delta))} نسبت به قبل`;
+      $(".score-card .trend").className = `trend ${delta > 0 ? "up" : delta < 0 ? "down" : "neutral"}`;
+      $(".score-card small").textContent = "مقایسه با آخرین snapshot همین دامنه";
+    }
     toast(`گزارش واقعی ${domain} آماده شد`);
   };
 
@@ -568,8 +683,26 @@
     if (format === "csv") {
       const rows = [["url", "title", "content_score", "technical_score", "words", "issues"], ...state.latest.pages.map(page => [page.url, page.title, page.contentScore, page.technicalScore, page.words, (page.contentChecks || []).filter(item => !item.passed).map(item => item.id).join("|")])];
       saveDownload("orbit-pages.csv", rows.map(row => row.map(cell => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\n"), "text/csv;charset=utf-8");
+    } else if (format === "html") {
+      const report = state.latest;
+      const rows = report.pages.filter(page => !page.error).slice(0, 80).map(page => `<tr><td>${esc(page.url)}</td><td>${esc(page.title || "—")}</td><td>${fa(page.technicalScore)}</td><td>${fa(page.contentScore)}</td><td>${fa(page.words)}</td></tr>`).join("");
+      const issues = report.issues.slice(0, 20).map(issue => `<li><b>${esc(issue.label)}</b> · ${fa(issue.count)} صفحه · ${esc(issue.detail)}</li>`).join("");
+      const html = `<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><title>گزارش Orbit · ${esc(new URL(report.url).hostname)}</title><style>body{font-family:Arial,sans-serif;max-width:1100px;margin:40px auto;padding:0 20px;color:#1c2942}h1{margin-bottom:4px}small{color:#66738a}.scores{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:24px 0}.score{padding:16px;border:1px solid #e2e7f0;border-radius:12px}.score b{display:block;font-size:28px;margin-top:8px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:10px;border-bottom:1px solid #e8ebf2;text-align:right;font-size:12px}li{margin:10px 0}@media print{body{margin:0}}</style><h1>گزارش Orbit SEO</h1><small>${esc(report.url)} · ${esc(new Date(report.checkedAt).toLocaleString("fa-IR"))}</small><div class="scores"><div class="score">امتیاز کلی<b>${fa(report.overall)}</b></div><div class="score">فنی<b>${fa(report.technical)}</b></div><div class="score">محتوا<b>${fa(report.content)}</b></div><div class="score">عملکرد<b>${fa(report.performance)}</b></div></div><h2>مسائل اولویت‌دار</h2><ul>${issues || "<li>مسئله‌ای ثبت نشد.</li>"}</ul><h2>صفحات بررسی‌شده</h2><table><thead><tr><th>URL</th><th>عنوان</th><th>فنی</th><th>محتوا</th><th>کلمات</th></tr></thead><tbody>${rows}</tbody></table><p><small>منابع: crawl HTML، probe لینک و Google PageSpeed در صورت دسترسی. هیچ عددی خارج از این منابع تولید نشده است.</small></p></html>`;
+      saveDownload(`orbit-${new URL(report.url).hostname}.html`, html, "text/html;charset=utf-8");
     } else saveDownload(`orbit-${new URL(state.latest.url).hostname}.json`, JSON.stringify(state.latest, null, 2), "application/json");
     toast(`گزارش ${format.toUpperCase()} دانلود شد`);
+  };
+
+  const openExportTool = () => {
+    if (!state.latest) { toast("ابتدا یک تحلیل واقعی اجرا کن", "error"); return; }
+    openModal("خروجی گزارش", `<p class="tool-hint">خروجی‌ها فقط از snapshot فعلی ساخته می‌شوند. برای PDF، ابتدا نسخه چاپی را باز کن و در پنجره چاپ گزینه Save as PDF را انتخاب کن.</p><div class="export-actions"><button class="primary-button" data-action="export-json">JSON کامل</button><button class="ghost-button" data-action="export-csv">CSV صفحات</button><button class="ghost-button" data-action="export-html">HTML قابل‌اشتراک</button><button class="ghost-button" data-action="print-report">چاپ / PDF</button></div>`);
+  };
+
+  const printReport = () => {
+    if (!state.latest) { toast("ابتدا یک تحلیل واقعی اجرا کن", "error"); return; }
+    closeModal();
+    goTo("dashboard");
+    setTimeout(() => window.print(), 80);
   };
 
   const exportArticles = (format = "csv") => {
@@ -596,7 +729,10 @@
 
   const openKeywordTool = () => openModal("خوشه‌ساز کلمات کلیدی", `<p class="tool-hint">هر کلمه را در یک خط وارد کن. گروه‌بندی بر اساس اشتراک واقعی واژه‌ها انجام می‌شود و حجم جست‌وجو حدس زده نمی‌شود.</p><textarea id="keywordInput" class="tool-textarea" rows="8" placeholder="طراحی سایت\nطراحی سایت فروشگاهی\nسئو تکنیکال\nچک لیست سئو تکنیکال"></textarea><button class="primary-button" id="clusterRun">ساخت خوشه‌ها</button><div id="toolOutput" class="tool-output"></div>`);
 
-  const openSettings = () => openModal("تنظیمات منابع داده", `<p class="tool-hint">برای crawl پایدار، آدرس Worker را وارد کن. GitHub Pages خودش backend اجرا نمی‌کند. این آدرس و کلید فقط در همین مرورگر ذخیره می‌شوند.</p><label class="tool-label" for="backendUrl">آدرس backend</label><input id="backendUrl" class="tool-input" type="url" autocomplete="off" value="${esc(getBackendUrl())}" placeholder="https://orbit-seo-api.example.workers.dev"><label class="tool-label" for="psiApiKey">Google PageSpeed API key اختیاری</label><input id="psiApiKey" class="tool-input" type="password" autocomplete="off" value="${esc(getPsiKey())}" placeholder="AIza..."><button class="primary-button" id="savePsiKey">ذخیره تنظیمات</button><div id="toolOutput" class="tool-output">${getBackendUrl() ? "backend تنظیم شده است." : "backend هنوز تنظیم نشده است."}</div>`);
+  const openSettings = () => {
+    const monitor = JSON.parse(localStorage.getItem(monitorStorage) || "{}");
+    openModal("تنظیمات منابع داده", `<p class="tool-hint">آدرس Worker و تنظیمات اتصال فقط در همین مرورگر ذخیره می‌شوند. اتصال واقعی GSC، GA4، رتبه و بک‌لینک نیازمند OAuth یا provider سمت backend است و با واردکردن نام property فعال نمی‌شود.</p><label class="tool-label" for="backendUrl">آدرس backend</label><input id="backendUrl" class="tool-input" type="url" autocomplete="off" value="${esc(getBackendUrl())}" placeholder="https://orbit-seo-api.example.workers.dev"><label class="tool-label" for="psiApiKey">Google PageSpeed API key اختیاری</label><input id="psiApiKey" class="tool-input" type="password" autocomplete="off" value="${esc(getPsiKey())}" placeholder="AIza..."><div class="integration-settings"><label class="tool-label" for="gscProperty">Search Console property</label><input id="gscProperty" class="tool-input" value="${esc(localStorage.getItem(integrationStorage.gsc) || "")}" placeholder="sc-domain:example.com"><small>وضعیت: نیازمند OAuth در backend</small><label class="tool-label" for="ga4Property">GA4 property ID</label><input id="ga4Property" class="tool-input" value="${esc(localStorage.getItem(integrationStorage.ga4) || "")}" placeholder="123456789"><small>وضعیت: نیازمند OAuth در backend</small><label class="tool-label" for="rankEndpoint">Rank provider endpoint اختیاری</label><input id="rankEndpoint" class="tool-input" type="url" value="${esc(localStorage.getItem(integrationStorage.rank) || "")}" placeholder="https://provider.example/api"><small>تا زمان اتصال provider، رتبه و حجم جست‌وجو نمایش داده نمی‌شود.</small><label class="tool-label" for="backlinkEndpoint">Backlink provider endpoint اختیاری</label><input id="backlinkEndpoint" class="tool-input" type="url" value="${esc(localStorage.getItem(integrationStorage.backlink) || "")}" placeholder="https://provider.example/api"><small>تا زمان اتصال provider، عددی برای بک‌لینک ساخته نمی‌شود.</small><label class="monitor-toggle"><input id="monitorEnabled" type="checkbox" ${monitor.enabled ? "checked" : ""}> هشدار محلی هنگام crawl بعدی</label><label class="tool-label" for="monitorThreshold">حداقل افت امتیاز برای هشدار</label><input id="monitorThreshold" class="tool-input" type="number" min="1" max="50" value="${esc(monitor.threshold || 5)}"><small>این قابلیت background job نیست؛ فقط هنگام اجرای crawl در همین مرورگر بررسی می‌شود.</small></div><button class="primary-button" id="savePsiKey">ذخیره تنظیمات</button><div id="toolOutput" class="tool-output">${getBackendUrl() ? "backend تنظیم شده است." : "backend هنوز تنظیم نشده است."}</div>`);
+  };
 
   const openBriefTool = () => {
     const page = state.latest?.root;
@@ -696,8 +832,12 @@
     const action = event.target.closest("[data-action]");
     if (!action) return;
     const name = action.dataset.action;
-    if (name === "close-modal") closeModal();
-    if (name === "export") exportReport();
+     if (name === "close-modal") closeModal();
+     if (name === "export") openExportTool();
+     if (name === "export-json") exportReport("json");
+     if (name === "export-csv") exportReport("csv");
+     if (name === "export-html") exportReport("html");
+     if (name === "print-report") printReport();
     if (name === "keyword") openKeywordTool();
     if (name === "brief") openBriefTool();
     if (name === "competitor") openCompetitorTool();
@@ -728,6 +868,14 @@
         else localStorage.removeItem(backendStorage);
         if (key) localStorage.setItem(psiKeyStorage, key);
         else localStorage.removeItem(psiKeyStorage);
+        [["gsc", "#gscProperty"], ["ga4", "#ga4Property"], ["rank", "#rankEndpoint"], ["backlink", "#backlinkEndpoint"]].forEach(([name, selector]) => {
+          const value = $(selector)?.value.trim() || "";
+          if (value) localStorage.setItem(integrationStorage[name], value);
+          else localStorage.removeItem(integrationStorage[name]);
+        });
+        const monitor = { enabled: Boolean($("#monitorEnabled")?.checked), threshold: Math.max(1, Math.min(50, Number($("#monitorThreshold")?.value || 5))) };
+        localStorage.setItem(monitorStorage, JSON.stringify(monitor));
+        if (monitor.enabled && "Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
         closeModal();
         toast(backend ? "تنظیمات backend و PageSpeed در همین مرورگر ذخیره شد" : "تنظیمات backend پاک شد؛ fallback عمومی فعال است");
       }
