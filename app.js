@@ -3,26 +3,24 @@
 
   const $ = (selector, scope = document) => scope.querySelector(selector);
   const $$ = (selector, scope = document) => [...scope.querySelectorAll(selector)];
-  const toFa = value => String(value).replace(/[0-9]/g, digit => "۰۱۲۳۴۵۶۷۸۹"[digit]);
-  const state = {
-    currentUrl: "example.com",
-    latest: null,
-    demo: { overall: 82, technical: 89, content: 76, performance: 78 }
-  };
+  const fa = value => String(value ?? "—").replace(/[0-9]/g, digit => "۰۱۲۳۴۵۶۷۸۹"[digit]);
+  const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+  const state = { latest: null, currentUrl: "", activeRun: null };
 
   const toast = (message, type = "success") => {
     const node = $("#toast");
-    $("#toastMessage").textContent = message;
+    if (!node) return;
+    $("#toastMessage", node).textContent = message;
     $(".toast-icon", node).textContent = type === "error" ? "!" : "✓";
     node.classList.toggle("error", type === "error");
     node.classList.add("show");
     clearTimeout(toast.timer);
-    toast.timer = setTimeout(() => node.classList.remove("show"), 3600);
+    toast.timer = setTimeout(() => node.classList.remove("show"), 4200);
   };
 
-  const openModal = (title, body) => {
+  const openModal = (title, html) => {
     $("#modalTitle").textContent = title;
-    $("#modalBody").textContent = body;
+    $("#modalBody").innerHTML = html;
     const modal = $("#modal");
     if (typeof modal.showModal === "function") modal.showModal();
     else modal.setAttribute("open", "");
@@ -43,50 +41,98 @@
   };
 
   const normalizeUrl = value => {
-    let url = value.trim();
+    let url = String(value || "").trim();
     if (!url) throw new Error("آدرس سایت را وارد کن.");
     if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
     const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("آدرس سایت معتبر نیست.");
+    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("فقط آدرس HTTP یا HTTPS قابل بررسی است.");
     parsed.hash = "";
+    parsed.search = parsed.search.replace(/utm_[^=]+=[^&]+&?/gi, "").replace(/[?&]$/, "");
     return parsed.toString().replace(/\/$/, "");
   };
 
-  const requestJson = async (url, timeout = 30000) => {
+  const fetchWithTimeout = async (url, options = {}, timeout = 30000) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-      const response = await fetch(url, { signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return await response.json();
-    } finally {
-      clearTimeout(timer);
-    }
+    try { return await fetch(url, { ...options, signal: controller.signal }); }
+    finally { clearTimeout(timer); }
   };
 
-  const requestText = async (url, timeout = 22000) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-      const response = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, { signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return await response.text();
-    } finally {
-      clearTimeout(timer);
-    }
+  const fetchText = async url => {
+    const started = performance.now();
+    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    const response = await fetchWithTimeout(proxyUrl, {}, 24000);
+    if (!response.ok) throw new Error(`دریافت ${url} با وضعیت ${response.status} شکست خورد`);
+    const text = await response.text();
+    if (!text.trim()) throw new Error(`پاسخ خالی از ${url}`);
+    return { url, text, ms: Math.round(performance.now() - started) };
   };
 
-  const lighthouseUrl = (url, strategy) => {
-    const params = new URLSearchParams({ url, strategy, category: "performance", category: "seo", category: "accessibility", category: "best-practices" });
-    // URLSearchParams keeps one category per key only when using append.
-    params.delete("category");
+  const fetchJson = async url => {
+    const response = await fetchWithTimeout(url, {}, 40000);
+    if (!response.ok) throw new Error(`API با وضعیت ${response.status} پاسخ داد`);
+    return response.json();
+  };
+
+  const pageSpeedUrl = (url, strategy) => {
+    const params = new URLSearchParams({ url, strategy });
     ["performance", "seo", "accessibility", "best-practices"].forEach(category => params.append("category", category));
     return `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?${params}`;
   };
 
-  const getAuditScore = (data, category) => Math.round((data?.lighthouseResult?.categories?.[category]?.score || 0) * 100);
+  const categoryScore = (data, category) => {
+    const value = data?.lighthouseResult?.categories?.[category]?.score;
+    return Number.isFinite(value) ? Math.round(value * 100) : null;
+  };
 
-  const inspectHtml = html => {
+  const parseRobots = text => {
+    const rules = { disallow: [], sitemaps: [] };
+    let applies = false;
+    String(text || "").split(/\r?\n/).forEach(line => {
+      const clean = line.replace(/#.*/, "").trim();
+      if (!clean) return;
+      const [rawKey, ...rest] = clean.split(":");
+      const key = rawKey.trim().toLowerCase();
+      const value = rest.join(":").trim();
+      if (key === "user-agent") applies = value === "*";
+      if (applies && key === "disallow" && value) rules.disallow.push(value);
+      if (key === "sitemap" && /^https?:\/\//i.test(value)) rules.sitemaps.push(value);
+    });
+    return rules;
+  };
+
+  const parseSitemap = (text, baseUrl) => {
+    const doc = new DOMParser().parseFromString(text, "application/xml");
+    const parserError = doc.querySelector("parsererror");
+    if (parserError) return [];
+    return [...doc.querySelectorAll("url > loc, sitemap > loc")].map(node => node.textContent.trim()).filter(value => {
+      try { return new URL(value, baseUrl).protocol.startsWith("http"); } catch { return false; }
+    }).map(value => new URL(value, baseUrl).toString().replace(/#.*$/, ""));
+  };
+
+  const isBlocked = (url, rules) => {
+    const path = new URL(url).pathname;
+    return rules.disallow.some(prefix => prefix === "/" || path.startsWith(prefix));
+  };
+
+  const isHtmlCandidate = url => !/\.(?:pdf|zip|rar|7z|jpe?g|png|gif|webp|svg|ico|css|js|xml|json|txt|mp4|mp3|woff2?)(?:$|\?)/i.test(new URL(url).pathname);
+
+  const discoverLinks = (html, pageUrl) => {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const origin = new URL(pageUrl).origin;
+    return [...doc.querySelectorAll("a[href]")].map(node => {
+      try {
+        const target = new URL(node.getAttribute("href"), pageUrl);
+        target.hash = "";
+        return target.toString().replace(/\/$/, "");
+      } catch { return null; }
+    }).filter(url => url && new URL(url).origin === origin && isHtmlCandidate(url));
+  };
+
+  const textLength = value => String(value || "").trim().length;
+  const check = (id, label, passed, detail, weight, severity = "warning") => ({ id, label, passed, detail, weight, severity });
+
+  const inspectPage = (html, url, meta = {}) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const title = doc.querySelector("title")?.textContent.trim() || "";
     const description = doc.querySelector('meta[name="description"]')?.content.trim() || "";
@@ -94,74 +140,304 @@
     const headings = [...doc.querySelectorAll("h2, h3")].map(node => node.textContent.trim()).filter(Boolean);
     const images = [...doc.images];
     const noAlt = images.filter(image => !image.hasAttribute("alt") || !image.alt.trim()).length;
+    const imageAltRate = images.length ? Math.round(((images.length - noAlt) / images.length) * 100) : 100;
     const links = [...doc.querySelectorAll("a[href]")];
+    const internalLinks = discoverLinks(html, url).length;
     const canonical = doc.querySelector('link[rel="canonical"]')?.href || "";
+    const robots = doc.querySelector('meta[name="robots"]')?.content.toLowerCase() || "";
+    const viewport = Boolean(doc.querySelector('meta[name="viewport"]'));
     const lang = doc.documentElement.lang || "";
     const words = (doc.body?.innerText || "").trim().split(/\s+/).filter(Boolean).length;
     const schema = [...doc.querySelectorAll('script[type="application/ld+json"]')].length;
     const openGraph = ["og:title", "og:description", "og:image"].filter(name => doc.querySelector(`meta[property="${name}"]`)).length;
-    const score = Math.max(0, Math.min(100, 100 - (title ? 0 : 18) - (description ? 0 : 15) - (h1.length === 1 ? 0 : 12) - (noAlt ? Math.min(15, noAlt * 2) : 0) - (words < 300 ? 12 : 0) - (canonical ? 0 : 8) - (lang ? 0 : 5)));
-    return { title, description, h1, headings, imageCount: images.length, noAlt, linkCount: links.length, canonical, lang, words, schema, openGraph, score };
+    const canonicalOk = !canonical || new URL(canonical, url).origin === new URL(url).origin;
+    const technicalChecks = [
+      check("https", "اتصال امن HTTPS", new URL(url).protocol === "https:", "آدرس با HTTPS باز شده است", 12, "critical"),
+      check("viewport", "متا viewport", viewport, viewport ? "برای موبایل تعریف شده است" : "متا viewport وجود ندارد", 10, "critical"),
+      check("lang", "زبان HTML", Boolean(lang), lang ? `زبان صفحه: ${lang}` : "ویژگی lang روی HTML وجود ندارد", 6),
+      check("canonical", "Canonical معتبر", canonicalOk, canonical ? canonical : "canonical پیدا نشد", 12),
+      check("robots", "عدم مسدودسازی صفحه", !/noindex|none/.test(robots), robots || "robots meta وجود ندارد", 10),
+      check("internal-links", "لینک داخلی", internalLinks > 0, `${fa(internalLinks)} لینک داخلی پیدا شد`, 10),
+      check("response", "پاسخ صفحه", true, `${fa(meta.ms || 0)}ms از مسیر بررسی`, 10)
+    ];
+    const contentChecks = [
+      check("title", "Title استاندارد", title.length >= 20 && title.length <= 60, title ? `${fa(title.length)} کاراکتر` : "Title خالی است", 16, "critical"),
+      check("description", "Meta description", description.length >= 70 && description.length <= 170, description ? `${fa(description.length)} کاراکتر` : "توضیحات متا وجود ندارد", 14, "critical"),
+      check("h1", "یک H1 واضح", h1.length === 1, `${fa(h1.length)} H1 پیدا شد`, 14, "critical"),
+      check("words", "حجم متن اصلی", words >= 300, `${fa(words)} کلمه متن قابل مشاهده`, 12),
+      check("images", "متن جایگزین تصاویر", imageAltRate >= 90, `${fa(imageAltRate)}٪ تصاویر alt دارند`, 10),
+      check("headings", "ساختار هدینگ", headings.length > 0, `${fa(headings.length)} زیرعنوان پیدا شد`, 8),
+      check("schema", "داده ساختاریافته", schema > 0, schema ? `${fa(schema)} بلوک JSON-LD` : "JSON-LD پیدا نشد", 8),
+      check("og", "Open Graph", openGraph >= 2, `${fa(openGraph)} مورد از ۳ مورد اصلی`, 8)
+    ];
+    const score = checks => Math.round(checks.reduce((sum, item) => sum + (item.passed ? item.weight : 0), 0) / checks.reduce((sum, item) => sum + item.weight, 0) * 100);
+    return { url, title, description, h1, headings, words, images: images.length, noAlt, imageAltRate, internalLinks, canonical, robots, viewport, lang, schema, openGraph, technicalScore: score(technicalChecks), contentScore: score(contentChecks), technicalChecks, contentChecks, ms: meta.ms || 0 };
   };
 
-  const fallbackContent = url => ({ title: new URL(url).hostname, description: "داده‌ی محتوایی در دسترس نبود", h1: [], headings: [], imageCount: 0, noAlt: 0, linkCount: 0, canonical: "", lang: "", words: 0, schema: 0, openGraph: 0, score: 65 });
-
-  const calculateReport = (url, mobile, desktop, content) => {
-    const mobilePerformance = getAuditScore(mobile, "performance");
-    const desktopPerformance = getAuditScore(desktop, "performance");
-    const seo = getAuditScore(mobile || desktop, "seo");
-    const accessibility = getAuditScore(mobile || desktop, "accessibility");
-    const bestPractices = getAuditScore(mobile || desktop, "best-practices");
-    const performance = mobilePerformance || desktopPerformance || state.demo.performance;
-    const technical = Math.round((seo || state.demo.technical) * .58 + (bestPractices || 80) * .22 + (content.canonical ? 100 : 55) * .2);
-    const overall = Math.round((technical * .34) + (content.score * .28) + (performance * .28) + ((accessibility || 80) * .1));
-    return { url, overall, technical, content: content.score, performance, mobilePerformance, desktopPerformance, seo, accessibility, bestPractices, contentAudit: content, checkedAt: new Date().toISOString() };
+  const reportProgress = (message, current = 0, total = 1) => {
+    const text = $("#scanStatus");
+    const bar = $("#scanProgressBar");
+    if (text) text.textContent = message;
+    if (bar) bar.style.width = `${Math.max(3, Math.min(100, Math.round(current / Math.max(total, 1) * 100)))}%`;
   };
 
-  const renderScore = (selector, value, progressSelector) => {
+  const concurrency = async (items, worker, limit = 4) => {
+    const output = [];
+    let cursor = 0;
+    const run = async () => {
+      while (cursor < items.length) {
+        const index = cursor++;
+        try { output[index] = await worker(items[index], index); }
+        catch (error) { output[index] = { error: error.message, url: items[index] }; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+    return output;
+  };
+
+  const collectSitemapUrls = async (sitemapUrls, baseUrl, maxUrls) => {
+    const collected = new Set();
+    const queue = [...new Set(sitemapUrls)].slice(0, 4);
+    while (queue.length && collected.size < maxUrls) {
+      const sitemap = queue.shift();
+      try {
+        const response = await fetchText(sitemap);
+        const urls = parseSitemap(response.text, baseUrl);
+        urls.forEach(url => {
+          if (/\.xml(?:$|\?)/i.test(new URL(url).pathname)) queue.push(url);
+          else if (new URL(url).origin === new URL(baseUrl).origin) collected.add(url.replace(/\/$/, ""));
+        });
+      } catch { /* An absent sitemap is a measured finding, not a fake URL list. */ }
+    }
+    return [...collected].slice(0, maxUrls);
+  };
+
+  const crawlSite = async (baseUrl, limit = 20, onProgress = reportProgress) => {
+    const origin = new URL(baseUrl).origin;
+    onProgress("در حال دریافت صفحه اصلی…", 0, limit + 1);
+    const rootResponse = await fetchText(baseUrl);
+    const rootPage = inspectPage(rootResponse.text, baseUrl, rootResponse);
+    let robots = { disallow: [], sitemaps: [] };
+    let robotsStatus = "در دسترس نیست";
+    try {
+      const robotsResponse = await fetchText(`${origin}/robots.txt`);
+      robots = parseRobots(robotsResponse.text);
+      robotsStatus = "دریافت شد";
+    } catch { robotsStatus = "یافت نشد یا قابل دریافت نیست"; }
+    let sitemapUrls = robots.sitemaps.length ? robots.sitemaps : [`${origin}/sitemap.xml`];
+    const sitemapPages = await collectSitemapUrls(sitemapUrls, baseUrl, limit * 3);
+    const discovered = [...new Set([baseUrl, ...sitemapPages, ...discoverLinks(rootResponse.text, baseUrl)])]
+      .filter(url => new URL(url).origin === origin && !isBlocked(url, robots) && isHtmlCandidate(url)).slice(0, limit);
+    const remaining = discovered.filter(url => url !== baseUrl);
+    const pageResults = await concurrency(remaining, async (url, index) => {
+      onProgress(`در حال بررسی صفحه ${fa(index + 2)} از ${fa(discovered.length)}…`, index + 1, discovered.length);
+      try {
+        const response = await fetchText(url);
+        return inspectPage(response.text, url, response);
+      } catch (error) {
+        return { url, error: error.message, technicalScore: null, contentScore: null, technicalChecks: [], contentChecks: [], ms: 0 };
+      }
+    }, 4);
+    const pages = [rootPage, ...pageResults];
+    const validPages = pages.filter(page => !page.error);
+    const issues = [];
+    const allChecks = validPages.flatMap(page => [...page.technicalChecks, ...page.contentChecks]);
+    const grouped = new Map();
+    allChecks.filter(item => !item.passed).forEach(item => grouped.set(item.id, { ...item, count: (grouped.get(item.id)?.count || 0) + 1 }));
+    [...grouped.values()].sort((a, b) => b.weight * b.count - a.weight * a.count).forEach(item => issues.push(item));
+    const avg = key => validPages.length ? Math.round(validPages.reduce((sum, page) => sum + (page[key] || 0), 0) / validPages.length) : null;
+    return {
+      url: baseUrl,
+      origin,
+      crawledAt: new Date().toISOString(),
+      limit,
+      pages,
+      validPages: validPages.length,
+      failedPages: pages.length - validPages.length,
+      robots: { ...robots, status: robotsStatus },
+      sitemap: { urls: sitemapPages.length, sources: sitemapUrls },
+      technical: avg("technicalScore"),
+      content: avg("contentScore"),
+      issues,
+      internalLinks: validPages.reduce((sum, page) => sum + page.internalLinks, 0),
+      words: validPages.reduce((sum, page) => sum + page.words, 0),
+      root: rootPage
+    };
+  };
+
+  const getPsi = async (url, strategy) => {
+    try {
+      const data = await fetchJson(pageSpeedUrl(url, strategy));
+      const audits = data.lighthouseResult?.audits || {};
+      const opportunities = Object.values(audits).filter(audit => audit.score !== null && audit.score < 0.9 && (audit.details?.overallSavingsMs || audit.details?.overallSavingsBytes)).sort((a, b) => (b.details?.overallSavingsMs || b.details?.overallSavingsBytes || 0) - (a.details?.overallSavingsMs || a.details?.overallSavingsBytes || 0)).slice(0, 6).map(audit => ({ title: audit.title, description: audit.description, savingsMs: audit.details?.overallSavingsMs || 0, savingsBytes: audit.details?.overallSavingsBytes || 0 }));
+      const metric = id => audits[id]?.displayValue || null;
+      return { strategy, available: true, performance: categoryScore(data, "performance"), seo: categoryScore(data, "seo"), accessibility: categoryScore(data, "accessibility"), bestPractices: categoryScore(data, "best-practices"), metrics: { lcp: metric("largest-contentful-paint"), cls: metric("cumulative-layout-shift"), inp: metric("interaction-to-next-paint") || metric("experimental-interaction-to-next-paint") }, opportunities, fetchedAt: new Date().toISOString() };
+    } catch (error) {
+      return { strategy, available: false, error: error.message, performance: null, seo: null, accessibility: null, bestPractices: null, metrics: {}, opportunities: [] };
+    }
+  };
+
+  const buildReport = (crawl, psiMobile, psiDesktop) => {
+    const psiScores = [psiMobile.seo, psiMobile.bestPractices, psiMobile.accessibility].filter(Number.isFinite);
+    const technical = crawl.technical === null ? null : Math.round(crawl.technical * .7 + (psiScores.length ? psiScores.reduce((a, b) => a + b, 0) / psiScores.length : crawl.technical) * .3);
+    const performance = psiMobile.performance ?? psiDesktop.performance;
+    const overallParts = [technical, crawl.content, performance].filter(Number.isFinite);
+    return { ...crawl, technical, performance, overall: overallParts.length ? Math.round(overallParts.reduce((a, b) => a + b, 0) / overallParts.length) : null, psi: { mobile: psiMobile, desktop: psiDesktop }, checkedAt: new Date().toISOString() };
+  };
+
+  const scoreText = (selector, value, progressSelector) => {
     const node = $(selector);
-    if (node) node.textContent = toFa(value);
+    if (node) node.textContent = value === null || value === undefined ? "—" : fa(value);
     const progress = progressSelector && $(progressSelector);
-    if (progress) progress.style.width = `${value}%`;
+    if (progress) progress.style.width = value == null ? "0%" : `${value}%`;
+  };
+
+  const emptyRow = (message, detail = "پس از اجرای تحلیل واقعی، داده‌ها اینجا نمایش داده می‌شوند.") => `<tr><td colspan="6"><div class="data-empty"><b>${message}</b><small>${detail}</small></div></td></tr>`;
+
+  const renderHistory = () => {
+    const history = JSON.parse(localStorage.getItem("orbit-history") || "[]");
+    const body = $("#historyBody");
+    if (!history.length) { body.innerHTML = emptyRow("هنوز تحلیلی ثبت نشده است."); return; }
+    body.innerHTML = history.slice(0, 8).map((item, index) => {
+      const host = new URL(item.url).hostname.replace(/^www\./, "");
+      const date = new Date(item.checkedAt).toLocaleString("fa-IR", { dateStyle: "short", timeStyle: "short" });
+      return `<tr><td><span class="site-favicon ${["orange-bg", "violet-bg", "blue-bg"][index % 3]}">${esc(host[0].toUpperCase())}</span><b>${esc(host)}</b></td><td>${date}</td><td><strong class="table-score">${item.score == null ? "—" : fa(item.score)}</strong></td><td><span class="trend neutral">تحلیل واقعی</span></td><td><span class="status-tag success">${item.partial ? "ناقص" : "کامل"}</span></td><td><button class="row-menu" data-history-url="${esc(item.url)}">↻</button></td></tr>`;
+    }).join("");
+  };
+
+  const renderTechnical = report => {
+    const banner = $(".technical-banner");
+    $(".technical-banner b").textContent = report.failedPages ? "بخشی از صفحات قابل دریافت نبودند" : "خزیدن صفحات با داده واقعی انجام شد";
+    $(".technical-banner p").textContent = `${fa(report.validPages)} صفحه بررسی شد · robots.txt: ${report.robots.status} · sitemap: ${fa(report.sitemap.urls)} URL`;
+    $(".banner-score").innerHTML = `${report.technical == null ? "—" : fa(report.technical)}<span>/۱۰۰</span>`;
+    if (banner) banner.classList.toggle("partial", Boolean(report.failedPages));
+    const cards = $$(".audit-card");
+    const checks = report.pages.flatMap(page => page.technicalChecks || []);
+    const cardData = [
+      ["ایندکس‌پذیری", "robots، sitemap و پاسخ صفحات", checks.filter(item => ["robots", "response"].includes(item.id))],
+      ["تجربه موبایل", "viewport و اتصال امن", checks.filter(item => ["viewport", "https"].includes(item.id))],
+      ["لینک‌سازی داخلی", "تعداد مسیرهای داخلی", report.pages.map(page => ({ passed: page.internalLinks > 0 }))],
+      ["Canonical", "canonical صفحات و دامنه", checks.filter(item => item.id === "canonical")]
+    ];
+    cards.forEach((card, index) => {
+      const items = cardData[index][2];
+      const value = items.length ? Math.round(items.filter(item => item.passed).length / items.length * 100) : null;
+      $(".audit-card b", card).textContent = cardData[index][0];
+      $(".audit-card small", card).textContent = cardData[index][1];
+      $(".audit-card > strong", card).textContent = value == null ? "—" : fa(value);
+    });
+    const list = $(".full-issue-list");
+    $(".filter-pills").innerHTML = `<button class="active" data-issue-filter="all">همه <b>${fa(report.issues.length)}</b></button><button data-issue-filter="critical">بحرانی <b>${fa(report.issues.filter(issue => issue.severity === "critical").length)}</b></button><button data-issue-filter="warning">هشدار <b>${fa(report.issues.filter(issue => issue.severity !== "critical").length)}</b></button>`;
+    list.innerHTML = report.issues.length ? report.issues.slice(0, 12).map((issue, index) => `<div class="full-issue"><span class="issue-status ${issue.severity === "critical" ? "red" : "orange"}">${issue.severity === "critical" ? "!" : "i"}</span><div><b>${esc(issue.label)}</b><small>${fa(issue.count)} صفحه · ${esc(issue.detail)}</small></div><span class="impact ${issue.severity === "critical" ? "high-impact" : "medium-impact"}">${issue.severity === "critical" ? "اثر زیاد" : "هشدار"}</span><button data-issue-id="${esc(issue.id)}">جزئیات ←</button></div>`).join("") : `<div class="data-empty"><b>مسئله‌ای در چک‌های فنی ثبت نشد.</b><small>این نتیجه فقط بر اساس صفحات دریافت‌شده است.</small></div>`;
+  };
+
+  const renderContent = report => {
+    const values = [report.validPages, report.pages.filter(page => page.contentScore >= 80).length, report.issues.filter(issue => issue.severity !== "critical").length];
+    $$(".content-stats strong").forEach((node, index) => { node.textContent = fa(values[index]); });
+    $$(".content-stats small").forEach((node, index) => { node.textContent = ["صفحات تحلیل‌شده", "صفحات با محتوای قوی", "فرصت‌های قابل اقدام"][index]; });
+    const keywordList = $(".keyword-list");
+    const topPages = report.pages.filter(page => !page.error).sort((a, b) => a.contentScore - b.contentScore).slice(0, 5);
+    keywordList.innerHTML = topPages.length ? topPages.map(page => `<div class="keyword-row"><div><b>${esc(page.title || new URL(page.url).pathname)}</b><small>${fa(page.words)} کلمه · ${fa(page.contentScore)}/۱۰۰ · ${esc(new URL(page.url).pathname || "/")}</small></div><span class="position">${page.contentScore < 70 ? "نیازمند کار" : "قابل قبول"}</span><span class="potential">${fa(page.contentScore)}</span></div>`).join("") : `<div class="data-empty"><b>صفحه‌ای برای نمایش نیست.</b></div>`;
+    const donut = $(".donut span");
+    if (donut) donut.innerHTML = `${fa(report.content)}<small>امتیاز محتوا</small>`;
+    $(".donut-legend").innerHTML = `<li><i class="dot purple-dot"></i>صفحات بررسی‌شده <b>${fa(report.validPages)}</b></li><li><i class="dot orange-dot"></i>کلمات متن <b>${fa(report.words)}</b></li><li><i class="dot blue-dot"></i>Schema فعال <b>${fa(report.pages.filter(page => page.schema).length)}</b></li>`;
+  };
+
+  const renderPerformance = report => {
+    const mobile = report.psi.mobile;
+    const desktop = report.psi.desktop;
+    scoreText("#lighthouseScore", mobile.performance);
+    const summary = $(".lighthouse-score div:last-child");
+    if (summary) summary.innerHTML = `<b>${mobile.available ? "تست Google دریافت شد" : "تست Google در دسترس نیست"}</b><p>${mobile.available ? `SEO: ${fa(mobile.seo)} · دسترسی: ${fa(mobile.accessibility)} · بهترین‌روش‌ها: ${fa(mobile.bestPractices)}` : esc(mobile.error || "پاسخی از PageSpeed دریافت نشد")}</p><span class="last-run">${mobile.available ? "منبع: Google PageSpeed Insights" : "منبع نامشخص نیست؛ عددی حدس زده نمی‌شود"}</span>`;
+    const metrics = mobile.metrics || {};
+    $$(".vitals b").forEach((node, index) => { node.textContent = [metrics.lcp, metrics.cls, metrics.inp][index] || "—"; });
+    $$(".vitals span").forEach((node, index) => { node.textContent = [metrics.lcp, metrics.cls, metrics.inp][index] ? "دریافت شد" : "داده ندارد"; });
+    const opportunities = mobile.opportunities || [];
+    $(".opportunities").innerHTML = `<div class="panel-heading"><div><h3>فرصت‌های سرعت</h3><p>فقط موارد برگرفته از پاسخ Google</p></div></div>${opportunities.length ? opportunities.map(item => `<div class="opportunity-row"><span class="opp-icon orange">◌</span><div><b>${esc(item.title)}</b><small>${esc(item.description || "")}</small></div><span>${item.savingsMs ? `${fa(Math.round(item.savingsMs))}ms` : `${fa(Math.round(item.savingsBytes / 1024))}KB`}</span></div>`).join("") : `<div class="data-empty"><b>فرصت قابل گزارش از Google دریافت نشد.</b><small>این به معنی عالی بودن سایت نیست؛ فقط داده‌ای برای نمایش وجود ندارد.</small></div>`}`;
+    $(".recommendation-banner p").textContent = desktop.available ? `موبایل ${fa(mobile.performance)} و دسکتاپ ${fa(desktop.performance)}؛ برای تصمیم دقیق، جزئیات هر فرصت را از PageSpeed باز کن.` : "بدون پاسخ معتبر Google، توصیه سرعت تولید نمی‌شود.";
   };
 
   const renderReport = report => {
     state.latest = report;
     state.currentUrl = report.url;
-    renderScore("#overallScore", report.overall, "#overallProgress");
-    renderScore("#technicalScore", report.technical);
-    renderScore("#contentScore", report.content);
-    renderScore("#performanceScore", report.performance);
-    renderScore("#lighthouseScore", report.performance);
-    const issueList = $("#priorityList");
-    const issues = [];
-    if (!report.contentAudit.title || report.contentAudit.title.length > 60) issues.push(["critical", "عنوان صفحه نیاز به اصلاح دارد", "عنوان خالی است یا بیش از ۶۰ کاراکتر دارد"]);
-    if (!report.contentAudit.description) issues.push(["critical", "توضیحات متا پیدا نشد", "برای افزایش CTR یک توضیح ۱۲۰ تا ۱۶۰ کاراکتری بنویس"]);
-    if (report.contentAudit.noAlt) issues.push(["warning", "تصاویر بدون متن جایگزین", `${toFa(report.contentAudit.noAlt)} تصویر · دسترسی و سئو`]);
-    if (report.contentAudit.words && report.contentAudit.words < 300) issues.push(["info", "این صفحه محتوای کمی دارد", `${toFa(report.contentAudit.words)} کلمه · فرصت توسعه محتوایی`]);
-    if (!report.contentAudit.schema) issues.push(["info", "داده ساختاریافته اضافه کن", "FAQ یا Organization می‌تواند نتیجه غنی بسازد"]);
-    if (!issues.length) issues.push(["info", "مشکل بحرانی پیدا نشد", "ساختار صفحه برای بررسی‌های بعدی آماده است"]);
-    issueList.innerHTML = issues.slice(0, 3).map((issue, index) => `<div class="issue-item"><span class="issue-number ${issue[0]}">${toFa(index + 1)}</span><div><b>${issue[1]}</b><small>${issue[2]}</small></div><span class="issue-arrow">←</span></div>`).join("");
+    scoreText("#overallScore", report.overall, "#overallProgress");
+    scoreText("#technicalScore", report.technical);
+    scoreText("#contentScore", report.content);
+    scoreText("#performanceScore", report.performance);
     const domain = new URL(report.url).hostname.replace(/^www\./, "");
+    $(".welcome-row h1").innerHTML = `گزارش واقعی <span class="wave">✦</span>`;
+    $(".welcome-row .subhead").textContent = `${domain} · ${fa(report.validPages)} صفحه از ${fa(report.pages.length)} صفحه با داده واقعی بررسی شد.`;
+    $(".scan-copy p").textContent = report.failedPages ? `${fa(report.failedPages)} صفحه قابل دریافت نبود؛ امتیازها فقط از داده‌های موجود محاسبه شده‌اند.` : "تمام اعداد این صفحه از همین crawl و پاسخ Google ساخته شده‌اند.";
+    $("#scanStatus").textContent = `گزارش آماده است · ${fa(report.validPages)} صفحه معتبر`;
+    $(".score-card .trend").textContent = "snapshot واقعی";
+    $(".score-card small").textContent = "بدون مقایسه تا snapshot بعدی";
+    const metrics = $$(".metric-card");
+    [report.issues.length, report.pages.filter(page => page.contentScore < 70).length, report.failedPages].forEach((value, index) => { if ($(".metric-foot", metrics[index + 1])) $(".metric-foot", metrics[index + 1]).innerHTML = `<i class="${value ? "warn-dot" : "good-dot"}"></i> ${fa(value)} مورد ثبت‌شده`; });
+    $("#priorityList").innerHTML = report.issues.length ? report.issues.slice(0, 3).map((issue, index) => `<div class="issue-item"><span class="issue-number ${issue.severity === "critical" ? "critical" : "warning"}">${fa(index + 1)}</span><div><b>${esc(issue.label)}</b><small>${fa(issue.count)} صفحه · ${esc(issue.detail)}</small></div><span class="issue-arrow">←</span></div>`).join("") : `<div class="data-empty"><b>در چک‌های ثبت‌شده مسئله‌ای پیدا نشد.</b></div>`;
+    $(".chart-wrap").innerHTML = `<div class="data-empty chart-empty"><b>روند تاریخی بعد از تحلیل‌های بعدی ساخته می‌شود.</b><small>این اولین snapshot واقعی این پروژه است.</small></div>`;
+    renderTechnical(report);
+    renderContent(report);
+    renderPerformance(report);
     const history = JSON.parse(localStorage.getItem("orbit-history") || "[]").filter(item => item.url !== report.url);
-    history.unshift({ url: report.url, score: report.overall, checkedAt: report.checkedAt });
-    localStorage.setItem("orbit-history", JSON.stringify(history.slice(0, 8)));
+    history.unshift({ url: report.url, score: report.overall, checkedAt: report.checkedAt, partial: Boolean(report.failedPages) });
+    localStorage.setItem("orbit-history", JSON.stringify(history.slice(0, 10)));
     localStorage.setItem("orbit-last-report", JSON.stringify(report));
     renderHistory();
-    toast(`تحلیل ${domain} آماده شد`);
+    toast(`گزارش واقعی ${domain} آماده شد`);
   };
 
-  const renderHistory = () => {
-    const body = $("#historyBody");
-    const saved = JSON.parse(localStorage.getItem("orbit-history") || "[]");
-    if (!saved.length) return;
-    body.innerHTML = saved.slice(0, 5).map((item, index) => {
-      const host = new URL(item.url).hostname.replace(/^www\./, "");
-      const first = host.charAt(0).toUpperCase();
-      const colors = ["orange-bg", "violet-bg", "blue-bg", "orange-bg", "violet-bg"];
-      const date = new Date(item.checkedAt);
-      return `<tr><td><span class="site-favicon ${colors[index]}">${first}</span><b>${host}</b></td><td>${index === 0 ? "امروز" : date.toLocaleDateString("fa-IR")}</td><td><strong class="table-score ${item.score > 85 ? "high" : item.score < 72 ? "medium" : ""}">${toFa(item.score)}</strong></td><td><span class="trend up">↗ تحلیل جدید</span></td><td><span class="status-tag success">کامل شد</span></td><td><button class="row-menu" data-history-url="${item.url}">⋮</button></td></tr>`;
-    }).join("");
+  const saveDownload = (name, body, type) => {
+    const blob = new Blob([body], { type });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  };
+
+  const exportReport = (format = "json") => {
+    if (!state.latest) { toast("ابتدا یک تحلیل واقعی اجرا کن", "error"); return; }
+    if (format === "csv") {
+      const rows = [["url", "title", "content_score", "technical_score", "words", "issues"], ...state.latest.pages.map(page => [page.url, page.title, page.contentScore, page.technicalScore, page.words, (page.contentChecks || []).filter(item => !item.passed).map(item => item.id).join("|")])];
+      saveDownload("orbit-pages.csv", rows.map(row => row.map(cell => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\n"), "text/csv;charset=utf-8");
+    } else saveDownload(`orbit-${new URL(state.latest.url).hostname}.json`, JSON.stringify(state.latest, null, 2), "application/json");
+    toast(`گزارش ${format.toUpperCase()} دانلود شد`);
+  };
+
+  const keywordTokens = value => value.toLowerCase().replace(/[،؛,|]+/g, " ").split(/\s+/).map(token => token.trim()).filter(token => token.length > 1);
+  const clusterKeywords = keywords => {
+    const groups = [];
+    keywords.forEach(keyword => {
+      const tokens = new Set(keywordTokens(keyword));
+      let group = groups.find(item => [...tokens].some(token => item.tokens.has(token)));
+      if (!group) { group = { tokens: new Set(), items: [] }; groups.push(group); }
+      tokens.forEach(token => group.tokens.add(token));
+      group.items.push(keyword);
+    });
+    return groups.map((group, index) => ({ name: [...group.tokens].slice(0, 3).join(" · ") || `خوشه ${index + 1}`, items: group.items }));
+  };
+
+  const openKeywordTool = () => openModal("خوشه‌ساز کلمات کلیدی", `<p class="tool-hint">هر کلمه را در یک خط وارد کن. گروه‌بندی بر اساس اشتراک واقعی واژه‌ها انجام می‌شود و حجم جست‌وجو حدس زده نمی‌شود.</p><textarea id="keywordInput" class="tool-textarea" rows="8" placeholder="طراحی سایت\nطراحی سایت فروشگاهی\nسئو تکنیکال\nچک لیست سئو تکنیکال"></textarea><button class="primary-button" id="clusterRun">ساخت خوشه‌ها</button><div id="toolOutput" class="tool-output"></div>`);
+
+  const openBriefTool = () => {
+    const page = state.latest?.root;
+    openModal("دستیار بریف محتوا", `<p class="tool-hint">بریف از داده‌های واقعی صفحه انتخاب‌شده ساخته می‌شود. کلمات کلیدی و حجم جست‌وجو بدون منبع وارد گزارش نمی‌شوند.</p><label class="tool-label">کلمه هدف</label><input id="briefKeyword" class="tool-input" value="${esc(page?.h1?.[0] || "")}" placeholder="مثلاً طراحی سایت فروشگاهی"><label class="tool-label">هدف صفحه</label><select id="briefIntent" class="tool-input"><option>تجاری</option><option>اطلاعاتی</option><option>مقایسه‌ای</option><option>ناوبری</option></select><button class="primary-button" id="briefRun">ساخت بریف از داده صفحه</button><div id="toolOutput" class="tool-output"></div>`);
+  };
+
+  const openCompetitorTool = () => openModal("مقایسه واقعی رقبا", `<p class="tool-hint">دامنه دوم با همان crawl محدود و قواعد امتیازدهی پروژه بررسی می‌شود. مقایسه فقط بعد از دریافت داده انجام خواهد شد.</p><label class="tool-label">آدرس رقیب</label><input id="competitorUrl" class="tool-input" placeholder="https://competitor.com"><button class="primary-button" id="competitorRun">شروع مقایسه</button><div id="toolOutput" class="tool-output"></div>`);
+
+  const runCompetitor = async () => {
+    if (!state.latest) { $("#toolOutput").innerHTML = "<b>ابتدا سایت اصلی را تحلیل کن.</b>"; return; }
+    let url;
+    try { url = normalizeUrl($("#competitorUrl").value); } catch (error) { $("#toolOutput").textContent = error.message; return; }
+    $("#competitorRun").disabled = true;
+    $("#toolOutput").innerHTML = "<span class=\"tool-loading\">در حال دریافت صفحات رقیب…</span>";
+    try {
+      const crawl = await crawlSite(url, Math.min(10, state.latest.limit), () => {});
+      const rows = [["شاخص", state.latest.origin, crawl.origin], ["امتیاز فنی", state.latest.technical, crawl.technical], ["امتیاز محتوا", state.latest.content, crawl.content], ["صفحات معتبر", state.latest.validPages, crawl.validPages], ["مسائل", state.latest.issues.length, crawl.issues.length]];
+      $("#toolOutput").innerHTML = `<div class="compare-table">${rows.map((row, index) => `<div><b>${esc(row[0])}</b><span>${index ? (typeof row[1] === "number" ? fa(row[1]) : esc(row[1])) : esc(row[1])}</span><span>${index ? (typeof row[2] === "number" ? fa(row[2]) : esc(row[2])) : esc(row[2])}</span></div>`).join("")}</div><small class="tool-source">منبع: crawl واقعی · سقف ${fa(crawl.limit)} صفحه</small>`;
+    } catch (error) { $("#toolOutput").textContent = `مقایسه انجام نشد: ${error.message}`; }
+    finally { $("#competitorRun").disabled = false; }
   };
 
   const runScan = async event => {
@@ -169,75 +445,109 @@
     const form = event.currentTarget;
     let url;
     try { url = normalizeUrl($("#siteUrl").value); } catch (error) { toast(error.message, "error"); return; }
+    const limit = Number($("#crawlLimit")?.value || 20);
+    const deep = $("#deepCheck")?.checked !== false;
     form.classList.add("loading");
-    $("#scanButton").setAttribute("aria-busy", "true");
-    const mobileEnabled = $("#mobileCheck").checked;
-    const deepEnabled = $("#deepCheck").checked;
+    state.activeRun = true;
+    reportProgress("آماده‌سازی تحلیل…", 0, limit + 1);
     try {
-      const calls = [requestJson(lighthouseUrl(url, mobileEnabled ? "mobile" : "desktop"))];
-      if (mobileEnabled) calls.push(requestJson(lighthouseUrl(url, "desktop")));
-      if (deepEnabled) calls.push(requestText(url));
-      const results = await Promise.allSettled(calls);
-      const mobile = results[0].status === "fulfilled" ? results[0].value : null;
-      const desktop = mobileEnabled && results[1]?.status === "fulfilled" ? results[1].value : null;
-      const htmlResult = deepEnabled ? results[mobileEnabled ? 2 : 1] : null;
-      const content = htmlResult?.status === "fulfilled" ? inspectHtml(htmlResult.value) : fallbackContent(url);
-      const report = calculateReport(url, mobile, desktop, content);
-      renderReport(report);
-      if (!mobile && !htmlResult) toast("اتصال به سرویس تحلیل برقرار نشد؛ داده نمونه نمایش داده شد", "error");
+      const crawlPromise = crawlSite(url, deep ? limit : 1, reportProgress);
+      const psiMobilePromise = $("#mobileCheck")?.checked === false ? Promise.resolve({ strategy: "desktop", available: false, error: "تست موبایل خاموش است" }) : getPsi(url, "mobile");
+      const psiDesktopPromise = getPsi(url, "desktop");
+      const [crawl, mobile, desktop] = await Promise.all([crawlPromise, psiMobilePromise, psiDesktopPromise]);
+      reportProgress("ساخت گزارش نهایی…", limit + 1, limit + 1);
+      renderReport(buildReport(crawl, mobile, desktop));
       goTo("dashboard");
+      if (!mobile.available && !desktop.available) toast("crawl انجام شد، اما PageSpeed پاسخ نداد؛ هیچ عددی حدس زده نشده است", "error");
     } catch (error) {
-      toast("تحلیل با خطا روبه‌رو شد؛ دوباره تلاش کن", "error");
+      toast(`تحلیل متوقف شد: ${error.message}`, "error");
+      reportProgress("تحلیل ناموفق بود", 0, 1);
     } finally {
       form.classList.remove("loading");
-      $("#scanButton").removeAttribute("aria-busy");
+      state.activeRun = false;
     }
   };
 
-  const buildExport = () => {
-    const report = state.latest || { url: state.currentUrl, overall: state.demo.overall, technical: state.demo.technical, content: state.demo.content, performance: state.demo.performance, checkedAt: new Date().toISOString() };
-    const payload = { product: "Orbit SEO", generatedAt: report.checkedAt, website: report.url, scores: { overall: report.overall, technical: report.technical, content: report.content, performance: report.performance }, contentAudit: report.contentAudit || report.content };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `orbit-seo-${new URL(report.url).hostname.replace(/^www\./, "")}.json`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-    toast("فایل گزارش دانلود شد");
+  const resetDemoMarkup = () => {
+    ["#overallScore", "#technicalScore", "#contentScore", "#performanceScore", "#lighthouseScore"].forEach(selector => scoreText(selector, null));
+    $("#overallProgress").style.width = "0%";
+    $("#priorityList").innerHTML = `<div class="data-empty"><b>هنوز تحلیلی انجام نشده است.</b><small>آدرس سایت را وارد کن تا داده واقعی ساخته شود.</small></div>`;
+    $("#historyBody").innerHTML = emptyRow("هنوز تحلیلی ثبت نشده است.");
+    $$(".metric-foot").forEach(node => { node.innerHTML = "<i class=\"good-dot\"></i> پس از تحلیل واقعی"; });
+    $$(".content-stats strong").forEach(node => { node.textContent = "—"; });
+    $$(".audit-card > strong").forEach(node => { node.textContent = "—"; });
+    $(".full-issue-list").innerHTML = `<div class="data-empty"><b>پس از crawl واقعی، مسائل اینجا نمایش داده می‌شوند.</b></div>`;
+    $(".chart-wrap").innerHTML = `<div class="data-empty chart-empty"><b>داده تاریخی وجود ندارد.</b><small>پس از اجرای تحلیل اول، snapshot ذخیره می‌شود.</small></div>`;
+    $(".keyword-list").innerHTML = `<div class="data-empty"><b>هنوز صفحه‌ای تحلیل نشده است.</b><small>پس از crawl، ضعیف‌ترین صفحات اینجا می‌آیند.</small></div>`;
+    $(".donut span").innerHTML = "—<small>بدون داده</small>";
+    $(".donut-legend").innerHTML = `<li>پوشش موضوعی پس از crawl واقعی ساخته می‌شود.</li>`;
+    $(".technical-banner b").textContent = "آماده بررسی واقعی";
+    $(".technical-banner p").textContent = "هنوز robots، sitemap یا صفحه‌ای دریافت نشده است.";
+    $(".banner-score").innerHTML = "—<span>/۱۰۰</span>";
+    $(".score-card .trend").textContent = "بدون داده";
+    $(".score-card small").textContent = "پس از تحلیل واقعی محاسبه می‌شود";
+    $(".filter-pills").innerHTML = `<button class="active">همه <b>—</b></button>`;
+    $(".lighthouse-score div:last-child").innerHTML = "<b>تست Google اجرا نشده است</b><p>پس از تحلیل، فقط امتیاز و متریک برگرفته از PageSpeed نمایش داده می‌شود.</p><span class=\"last-run\">بدون داده</span>";
+    $$(".vitals b").forEach(node => { node.textContent = "—"; });
+    $$(".vitals span").forEach(node => { node.textContent = "بدون داده"; });
+    $(".opportunities").innerHTML = `<div class="panel-heading"><div><h3>فرصت‌های سرعت</h3><p>پس از دریافت پاسخ Google</p></div></div><div class="data-empty"><b>هنوز تستی اجرا نشده است.</b></div>`;
+    $(".recommendation-banner p").textContent = "پس از تست واقعی Google، این بخش فقط توصیه‌های برگرفته از همان پاسخ را نشان می‌دهد.";
+    if (!$("#scanProgress")) $(".scan-form").insertAdjacentHTML("beforeend", `<div id="scanProgress" class="crawl-progress"><div><span id="scanStatus">آماده تحلیل واقعی</span><b>سقف crawl: <select id="crawlLimit"><option value="10">۱۰</option><option value="20" selected>۲۰</option><option value="40">۴۰</option></select> صفحه</b></div><i><em id="scanProgressBar"></em></i></div>`);
   };
 
   document.addEventListener("click", event => {
     const nav = event.target.closest("[data-view]");
     if (nav) { goTo(nav.dataset.view); return; }
+    const history = event.target.closest("[data-history-url]");
+    if (history) { $("#siteUrl").value = history.dataset.historyUrl; goTo("dashboard"); toast("آدرس برای تحلیل دوباره آماده شد"); return; }
+    const issue = event.target.closest("[data-issue-id]");
+    if (issue) { const item = state.latest?.issues.find(row => row.id === issue.dataset.issueId); if (item) openModal(item.label, `<p>${esc(item.detail)}</p><p>تعداد صفحات: <b>${fa(item.count)}</b></p><p class="tool-source">این یافته از چک‌های HTML صفحات دریافت‌شده ساخته شده است.</p>`); return; }
+    const filter = event.target.closest("[data-issue-filter]");
+    if (filter && state.latest) {
+      $$("[data-issue-filter]").forEach(item => item.classList.toggle("active", item === filter));
+      const selected = filter.dataset.issueFilter;
+      const issues = selected === "all" ? state.latest.issues : state.latest.issues.filter(item => selected === "critical" ? item.severity === "critical" : item.severity !== "critical");
+      $(".full-issue-list").innerHTML = issues.length ? issues.slice(0, 12).map(issue => `<div class="full-issue"><span class="issue-status ${issue.severity === "critical" ? "red" : "orange"}">${issue.severity === "critical" ? "!" : "i"}</span><div><b>${esc(issue.label)}</b><small>${fa(issue.count)} صفحه · ${esc(issue.detail)}</small></div><span class="impact ${issue.severity === "critical" ? "high-impact" : "medium-impact"}">${issue.severity === "critical" ? "اثر زیاد" : "هشدار"}</span><button data-issue-id="${esc(issue.id)}">جزئیات ←</button></div>`).join("") : `<div class="data-empty"><b>در این دسته مسئله‌ای ثبت نشده است.</b></div>`;
+      return;
+    }
     const action = event.target.closest("[data-action]");
     if (!action) return;
-    const actions = {
-      export: buildExport,
-      "close-modal": closeModal,
-      fixes: () => openModal("برنامه پیشنهادی", "اول عنوان‌های طولانی را اصلاح کن، سپس توضیحات متا و متن جایگزین تصاویر را به ترتیب اثرگذاری تکمیل کن."),
-      "all-history": () => openModal("آرشیو تحلیل‌ها", "تمام تحلیل‌های این مرورگر در همین دستگاه ذخیره می‌شوند. برای پشتیبان‌گیری از خروجی گزارش استفاده کن."),
-      settings: () => openModal("تنظیمات فضای کاری", "در نسخه بعدی می‌توانی دامنه‌های پروژه، زبان گزارش و اتصال‌های Google را از اینجا مدیریت کنی."),
-      keyword: () => openModal("خوشه‌ساز کلمات", "کلمه‌ی اصلی را وارد کن تا خوشه‌های پیشنهادی، نیت جست‌وجو و ساختار صفحات ستون استخراج شود."),
-      brief: () => openModal("دستیار بریف محتوا", "برای ساخت بریف دقیق، بعد از اجرای تحلیل یک صفحه را از گزارش انتخاب کن. این قابلیت آماده اتصال به داده‌های واقعی پروژه است."),
-      competitor: () => openModal("مقایسه رقبا", "دو دامنه رقیب را اضافه کن تا اختلاف امتیاز فنی، سرعت و پوشش موضوعی را کنار هم ببینی."),
-      recrawl: () => { goTo("dashboard"); $("#siteUrl").focus(); toast("آدرس سایت را بررسی کن و تحلیل جدید را شروع کن"); }
-    };
-    if (actions[action.dataset.action]) actions[action.dataset.action]();
+    const name = action.dataset.action;
+    if (name === "close-modal") closeModal();
+    if (name === "export") exportReport();
+    if (name === "keyword") openKeywordTool();
+    if (name === "brief") openBriefTool();
+    if (name === "competitor") openCompetitorTool();
+    if (name === "settings") openModal("تنظیمات و منابع داده", `<p>منابع فعال این نسخه:</p><ul class="tool-list"><li>HTML از مسیر واسط عمومی برای crawl</li><li>Google PageSpeed Insights برای Lighthouse</li><li>ذخیره گزارش در همین مرورگر</li></ul><p class="tool-source">برای crawl بدون واسط و Search Console/GA4 باید یک API امن سمت سرور اضافه شود.</p>`);
+    if (name === "all-history") openModal("آرشیو تحلیل‌ها", `<div class="tool-output">${JSON.parse(localStorage.getItem("orbit-history") || "[]").map(item => `<p><b>${esc(item.url)}</b><br><small>${fa(item.score)} · ${new Date(item.checkedAt).toLocaleString("fa-IR")}</small></p>`).join("") || "هنوز گزارشی ذخیره نشده است."}</div>`);
+    if (name === "fixes") goTo("technical");
+    if (name === "recrawl") { goTo("dashboard"); $("#siteUrl").focus(); }
+  });
+
+  document.addEventListener("click", event => {
+    if (event.target.id === "clusterRun") {
+      const keywords = $("#keywordInput").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+      const groups = clusterKeywords(keywords);
+      $("#toolOutput").innerHTML = groups.length ? groups.map(group => `<div class="cluster"><b>${esc(group.name)}</b><small>${group.items.map(item => esc(item)).join(" · ")}</small></div>`).join("") : "کلمه‌ای وارد نشده است.";
+    }
+    if (event.target.id === "briefRun") {
+      const page = state.latest?.root;
+      const keyword = $("#briefKeyword").value.trim() || page?.h1?.[0] || "موضوع اصلی";
+      $("#toolOutput").innerHTML = `<div class="brief-result"><b>بریف ${esc(keyword)}</b><p>عنوان پیشنهادی: ${esc(keyword)} | راهنمای کامل، کاربردی و به‌روز</p><p>ساختار پیشنهادی: مقدمه · تعریف مسئله · مقایسه راهکارها · مراحل اجرا · FAQ · CTA</p><p>پوشش فعلی صفحه: ${fa(page?.words || 0)} کلمه · ${fa(page?.headings?.length || 0)} زیرعنوان · ${page?.schema ? "Schema دارد" : "Schema ندارد"}</p></div>`;
+    }
+    if (event.target.id === "competitorRun") runCompetitor();
   });
 
   $("#scanForm").addEventListener("submit", runScan);
   $$(".device-tabs button").forEach(button => button.addEventListener("click", () => {
     $$(".device-tabs button").forEach(item => item.classList.remove("active"));
     button.classList.add("active");
-    if (state.latest) renderScore("#lighthouseScore", button.textContent.trim() === "دسکتاپ" ? (state.latest.desktopPerformance || state.latest.performance) : state.latest.mobilePerformance || state.latest.performance);
+    const data = state.latest?.psi?.[button.textContent.trim() === "دسکتاپ" ? "desktop" : "mobile"];
+    if (data) renderPerformance({ ...state.latest, psi: { mobile: button.textContent.trim() === "دسکتاپ" ? state.latest.psi.mobile : data, desktop: state.latest.psi.desktop } });
   }));
-  document.addEventListener("click", event => {
-    const historyButton = event.target.closest("[data-history-url]");
-    if (historyButton) { $("#siteUrl").value = historyButton.dataset.historyUrl; goTo("dashboard"); toast("پروژه برای تحلیل دوباره آماده شد"); }
-  });
-
+  resetDemoMarkup();
   const savedLast = JSON.parse(localStorage.getItem("orbit-last-report") || "null");
-  if (savedLast) renderReport(savedLast);
-  renderHistory();
+  if (savedLast?.pages?.length) renderReport(savedLast);
+  else renderHistory();
   if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
 })();
