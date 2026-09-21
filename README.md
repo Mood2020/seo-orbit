@@ -22,6 +22,7 @@
 - backend آماده Cloudflare Worker در `backend/` برای fetch امن HTML و proxy رسمی PageSpeed؛ Worker فعلی: `https://orbit-seo-api.newtazn.workers.dev`
 - PWA قابل نصب روی موبایل و دسکتاپ
 - APK اندروید با GitHub Actions
+- APK با پوسته موبایلی اختصاصی، ناوبری پایین، هدر برند و آیکون Orbit مستقل از ظاهر دسکتاپ وب
 
 فهرست قابلیت‌های مرجع و نقشه راه معماری در `SEO_ROADMAP.md` نگهداری می‌شود.
 
