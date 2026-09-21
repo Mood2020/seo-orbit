@@ -23,6 +23,8 @@
 - crawl قابل تنظیم از ۱۰۰ تا ۱۰۰۰ URL و خروجی جداگانه CSV/JSON برای مقاله‌ها
 - امکان ذخیره اختیاری کلید PageSpeed در حافظه محلی مرورگر برای عبور از quota عمومی Google
 - backend آماده Cloudflare Worker در `backend/` برای fetch امن HTML، probe لینک و proxy رسمی PageSpeed؛ Worker فعلی: `https://orbit-seo-api.newtazn.workers.dev`
+- قرارداد API فاز دوم برای پروژه‌ها و snapshotهای KV، گزارش shareable با token موقت، وضعیت integrationها، OAuth Search Console/GA4، query واقعی Google، providerهای rank/backlink و scheduler webhook
+- صفحه «اتصال منابع و پروژه» در داشبورد برای وضعیت credentialها، ذخیره snapshot ابری، لینک گزارش، OAuth و query providerها
 - PWA قابل نصب روی موبایل و دسکتاپ
 - APK اندروید با GitHub Actions
 - APK با پوسته موبایلی اختصاصی، ناوبری پایین، هدر برند و آیکون Orbit مستقل از ظاهر دسکتاپ وب
@@ -37,4 +39,4 @@
 
 ## محدودیت فنی نسخه GitHub Pages
 
-GitHub Pages بک‌اند ندارد. برای تحلیل پایدار، Worker داخل `backend/` را deploy کن و آدرس آن را از تنظیمات داشبورد وارد کن. Worker fetch HTML را با timeout، محدودیت حجم، CORS و جلوگیری از آدرس‌های private انجام می‌دهد و PageSpeed را از API رسمی Google عبور می‌دهد. اگر backend تنظیم نشده باشد، fallbackهای عمومی امتحان می‌شوند و در صورت شکست علت واقعی نمایش داده می‌شود؛ امتیاز حدسی تولید نمی‌شود. برای هزاران URL، اتصال OAuth به Search Console/GA4، rank tracking و زمان‌بندی crawl باید سرویس داده جداگانه اضافه شود.
+GitHub Pages بک‌اند ندارد. برای تحلیل پایدار، Worker داخل `backend/` را deploy کن و آدرس آن را از تنظیمات داشبورد وارد کن. Worker fetch HTML را با timeout، محدودیت حجم، CORS و جلوگیری از آدرس‌های private انجام می‌دهد و PageSpeed را از API رسمی Google عبور می‌دهد. اگر backend تنظیم نشده باشد، fallbackهای عمومی امتحان می‌شوند و در صورت شکست علت واقعی نمایش داده می‌شود؛ امتیاز حدسی تولید نمی‌شود. برای فعال‌سازی فاز دوم، `ORBIT_DATA` KV binding و secretهای مستندشده در `backend/wrangler.toml` را تنظیم کن. بدون آن‌ها UI وضعیت «نیازمند تنظیم» نشان می‌دهد و از تولید داده ساختگی خودداری می‌کند.

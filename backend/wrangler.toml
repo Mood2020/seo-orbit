@@ -4,3 +4,9 @@ compatibility_date = "2026-09-21"
 
 [vars]
 # Optional. Set PAGESPEED_API_KEY as a secret in production instead.
+
+# Configure these bindings in the Cloudflare project before enabling
+# persistent projects, snapshots, OAuth tokens, and shareable reports.
+# [[kv_namespaces]]
+# binding = "ORBIT_DATA"
+# id = "<production-kv-namespace-id>"

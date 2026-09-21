@@ -14,7 +14,7 @@ The reference products consistently expose these capability groups:
 
 ## Current honest scope
 
-The static Pages client now provides a real bounded crawl, HTML audit, link probe contract, redirect/image/Schema findings, content extraction, deterministic scoring, browser-local history, HTML/CSV/JSON exports and local-on-next-crawl alerts. It cannot safely provide Google OAuth, persistent scheduled jobs, large crawls, live rank positions, search volume or backlink indexes without a server-side data service.
+The static Pages client now provides a real bounded crawl, HTML audit, link probe contract, redirect/image/Schema findings, content extraction, deterministic scoring, browser-local history, HTML/CSV/JSON exports and local-on-next-crawl alerts. Phase two adds server contracts for KV-backed snapshots, share tokens, Google OAuth/query boundaries, rank/backlink providers and scheduler webhooks; those integrations remain disabled until their bindings and secrets are configured.
 
 ## Target architecture
 
@@ -32,3 +32,14 @@ The static Pages client now provides a real bounded crawl, HTML audit, link prob
 4. Add Search Console and GA4 OAuth.
 5. Add a paid or user-supplied SERP/keyword provider for rank and keyword data.
 6. Add backlink provider integration and shareable/scheduled reports.
+
+## Phase two API contract
+
+- `GET /api/integrations/status` reports configured sources without exposing secrets.
+- `GET /api/integrations/google/start?service=gsc|ga4` starts OAuth when Google secrets, KV, redirect URI and token encryption are configured.
+- `GET /api/integrations/google/callback` exchanges the OAuth code and stores an encrypted token in KV.
+- `POST /api/gsc/query` and `POST /api/ga4/query` proxy authenticated, source-labelled Google data.
+- `POST /api/projects` and `POST /api/projects/:id/snapshots` persist normalized snapshot summaries plus the evidence report in KV.
+- `POST /api/reports/share` creates a 30-day share token; `GET /api/reports/share/:token` reads it.
+- `POST /api/providers/rank` and `POST /api/providers/backlinks` call server-side provider URLs only when their secrets exist.
+- `POST /api/schedules` forwards to an explicitly configured scheduler webhook; the Worker does not pretend to run dynamic cron without one.
