@@ -19,7 +19,7 @@
 - فهرست مقاله‌ها با تشخیص JSON-LD، metadata، ساختار `article` و الگوی URL؛ شامل عنوان، URL، نوع، تاریخ، نویسنده، دسته، کلمات و لینک‌های ورودی
 - crawl قابل تنظیم از ۱۰۰ تا ۱۰۰۰ URL و خروجی جداگانه CSV/JSON برای مقاله‌ها
 - امکان ذخیره اختیاری کلید PageSpeed در حافظه محلی مرورگر برای عبور از quota عمومی Google
-- backend آماده Cloudflare Worker در `backend/` برای fetch امن HTML و proxy رسمی PageSpeed
+- backend آماده Cloudflare Worker در `backend/` برای fetch امن HTML و proxy رسمی PageSpeed؛ Worker فعلی: `https://orbit-seo-api.newtazn.workers.dev`
 - PWA قابل نصب روی موبایل و دسکتاپ
 - APK اندروید با GitHub Actions
 

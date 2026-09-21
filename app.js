@@ -8,8 +8,9 @@
   const state = { latest: null, currentUrl: "", activeRun: null };
   const psiKeyStorage = "orbit-pagespeed-key";
   const backendStorage = "orbit-api-url";
+  const defaultBackendUrl = "https://orbit-seo-api.newtazn.workers.dev";
   const getPsiKey = () => localStorage.getItem(psiKeyStorage) || "";
-  const getBackendUrl = () => (localStorage.getItem(backendStorage) || "").trim().replace(/\/$/, "");
+  const getBackendUrl = () => (localStorage.getItem(backendStorage) || defaultBackendUrl).trim().replace(/\/$/, "");
   const backendEndpoint = (path, params) => {
     const base = getBackendUrl();
     if (!base) return "";
