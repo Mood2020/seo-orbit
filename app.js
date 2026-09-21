@@ -306,6 +306,7 @@
     } catch { robotsStatus = "یافت نشد یا قابل دریافت نیست"; }
     let sitemapUrls = robots.sitemaps.length ? robots.sitemaps : [`${origin}/sitemap.xml`];
     const sitemapPages = await collectSitemapUrls(sitemapUrls, baseUrl, limit * 3);
+    const pages = [rootPage];
     const queue = [];
     const queued = new Set([baseUrl]);
     const enqueue = (url, depth) => {
@@ -318,7 +319,6 @@
     };
     sitemapPages.forEach(url => enqueue(url, 1));
     discoverLinks(rootResponse.text, baseUrl).forEach(url => enqueue(url, 1));
-    const pages = [rootPage];
     while (queue.length && pages.length < limit) {
       const batch = queue.splice(0, Math.min(4, limit - pages.length));
       const pageResults = await concurrency(batch, async item => {
