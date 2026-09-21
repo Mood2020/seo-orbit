@@ -5,11 +5,12 @@
   const $$ = (selector, scope = document) => [...scope.querySelectorAll(selector)];
   const fa = value => String(value ?? "—").replace(/[0-9]/g, digit => "۰۱۲۳۴۵۶۷۸۹"[digit]);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
-  const state = { latest: null, currentUrl: "", activeRun: null };
+  const state = { latest: null, currentUrl: "", activeRun: null, integrations: null, remoteProject: null };
   const psiKeyStorage = "orbit-pagespeed-key";
   const backendStorage = "orbit-api-url-v2";
   const integrationStorage = { gsc: "orbit-gsc-property", ga4: "orbit-ga4-property", rank: "orbit-rank-endpoint", backlink: "orbit-backlink-endpoint" };
   const monitorStorage = "orbit-monitor-v1";
+  const remoteProjectStorage = "orbit-remote-project-v1";
   const defaultBackendUrl = "https://orbit-seo-api.newtazn.workers.dev";
   const getPsiKey = () => localStorage.getItem(psiKeyStorage) || "";
   const getBackendUrl = () => (localStorage.getItem(backendStorage) || defaultBackendUrl).trim().replace(/\/$/, "");
@@ -50,6 +51,12 @@
     const active = $(`.nav-item[data-view="${view}"]`);
     $("#pageTitle").textContent = active ? active.textContent.trim().replace(/\s+/g, " ") : "نمای کلی";
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const ensurePhaseTwoUi = () => {
+    if ($("#integrationsView")) return;
+    $(".nav-label.second")?.insertAdjacentHTML("beforebegin", `<button class="nav-item" data-view="integrations"><span class="nav-icon">◈</span>اتصال منابع و پروژه</button>`);
+    $(".main-content")?.insertAdjacentHTML("beforeend", `<section class="view" id="integrationsView" data-view-panel="integrations"><div class="page-intro"><div><p class="eyebrow">منابع و اتوماسیون</p><h1>اتصال داده‌های واقعی</h1><p class="subhead">پروژه‌ها، snapshotها و providerهای بیرونی فقط وقتی فعال نمایش داده می‌شوند که backend واقعاً credential و storage داشته باشد.</p></div><button class="primary-button" data-action="refresh-integrations">↻ بررسی وضعیت</button></div><div class="integration-grid" id="integrationGrid"><article class="panel integration-card" data-integration-card="storage"><span class="integration-icon">▣</span><div><b>پروژه و snapshot</b><small>Cloudflare KV</small></div><strong>در حال بررسی</strong></article><article class="panel integration-card" data-integration-card="gsc"><span class="integration-icon">G</span><div><b>Search Console</b><small>OAuth و Search Analytics</small></div><strong>در حال بررسی</strong></article><article class="panel integration-card" data-integration-card="ga4"><span class="integration-icon">A</span><div><b>GA4</b><small>OAuth و گزارش رفتار</small></div><strong>در حال بررسی</strong></article><article class="panel integration-card" data-integration-card="scheduler"><span class="integration-icon">⏱</span><div><b>گزارش زمان‌بندی‌شده</b><small>Scheduler webhook</small></div><strong>در حال بررسی</strong></article><article class="panel integration-card" data-integration-card="rank"><span class="integration-icon">↗</span><div><b>Rank provider</b><small>SERP و رتبه روزانه</small></div><strong>در حال بررسی</strong></article><article class="panel integration-card" data-integration-card="backlink"><span class="integration-icon">⌁</span><div><b>Backlink provider</b><small>لینک و referring domain</small></div><strong>در حال بررسی</strong></article></div><div class="integration-columns"><article class="panel integration-panel"><div class="panel-heading"><div><h3>اتصال حساب‌های Google</h3><p>توکن‌ها فقط با encryption key سمت Worker نگهداری می‌شوند.</p></div></div><div class="integration-actions"><button class="primary-button" data-action="connect-gsc">اتصال Search Console</button><button class="ghost-button" data-action="connect-ga4">اتصال GA4</button></div><div class="tool-output" id="googleOutput">وضعیت اتصال بعد از بررسی backend نمایش داده می‌شود.</div></article><article class="panel integration-panel"><div class="panel-heading"><div><h3>پروژه و snapshot</h3><p>گزارش crawl موفق به پروژه ابری متصل می‌شود؛ در غیر این صورت تاریخچه محلی باقی می‌ماند.</p></div></div><div class="integration-actions"><button class="primary-button" data-action="save-remote-snapshot">ذخیره snapshot فعلی</button><button class="ghost-button" data-action="load-remote-history">خواندن تاریخچه ابری</button></div><div class="tool-output" id="projectOutput">هنوز snapshot ابری دریافت نشده است.</div></article><article class="panel integration-panel"><div class="panel-heading"><div><h3>گزارش shareable و زمان‌بندی</h3><p>share token به مدت ۳۰ روز معتبر است. زمان‌بندی به scheduler جداگانه نیاز دارد.</p></div></div><div class="integration-actions"><button class="primary-button" data-action="share-latest">ساخت لینک گزارش</button><button class="ghost-button" data-action="schedule-latest">ثبت زمان‌بندی هفتگی</button></div><div class="tool-output" id="reportOutput">پس از اجرای crawl، گزارش فعلی برای اشتراک آماده می‌شود.</div></article></div><article class="panel provider-panel"><div class="panel-heading"><div><h3>Keyword، رتبه و بک‌لینک</h3><p>این فرم‌ها داده را مستقیماً از provider تنظیم‌شده می‌خوانند؛ volume، rank یا backlink بدون پاسخ provider نمایش داده نمی‌شود.</p></div></div><div class="provider-inputs"><label class="tool-label" for="rankKeywords">کلمات هدف، هر خط یک مورد</label><textarea id="rankKeywords" class="tool-textarea" rows="4" placeholder="طراحی سایت\nسئو تکنیکال"></textarea><button class="primary-button" data-action="query-rank">دریافت رتبه واقعی</button><button class="ghost-button" data-action="query-backlinks">دریافت بک‌لینک واقعی</button></div><div class="tool-output" id="providerOutput">provider هنوز درخواست نشده است.</div></article></section>`);
   };
 
   const normalizeUrl = value => {
@@ -100,8 +107,8 @@
     throw new Error(`دریافت ${url} ناموفق بود (${errors.join(" | ")})${getBackendUrl() ? "" : "؛ برای تحلیل پایدار، آدرس backend را در تنظیمات وارد کن."}`);
   };
 
-  const fetchJson = async url => {
-    const response = await fetchWithTimeout(url, {}, 40000);
+  const fetchJson = async (url, options = {}) => {
+    const response = await fetchWithTimeout(url, options, 40000);
     const body = await response.text();
     let data;
     try { data = JSON.parse(body); } catch { data = null; }
@@ -114,6 +121,94 @@
     if (!endpoint) return { url, status: null, ok: null, finalUrl: url, redirected: false, error: "backend تنظیم نشده است" };
     try { return await fetchJson(endpoint); }
     catch (error) { return { url, status: null, ok: null, finalUrl: url, redirected: false, unavailable: /مسیر API پیدا نشد|not_found/i.test(error.message), error: error.message }; }
+  };
+
+  const postJson = body => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const integrationStateText = value => value?.configured ? "فعال" : "نیازمند تنظیم";
+  const renderIntegrationStatus = payload => {
+    state.integrations = payload?.integrations || {};
+    Object.entries(state.integrations).forEach(([name, value]) => {
+      const card = $(`[data-integration-card="${name}"]`);
+      if (!card) return;
+      const strong = $("strong", card);
+      strong.textContent = integrationStateText(value);
+      strong.className = value?.configured ? "integration-ready" : "integration-missing";
+      card.title = value?.missing?.length ? `مفقود: ${value.missing.join(", ")}` : "تنظیم شده است";
+    });
+    const output = $("#googleOutput");
+    if (output) output.textContent = state.integrations.gsc?.configured && state.integrations.ga4?.configured ? "OAuth Google آماده است." : "OAuth Google هنوز در Worker تنظیم نشده است.";
+    const projectOutput = $("#projectOutput");
+    if (projectOutput && state.integrations.storage) projectOutput.textContent = state.integrations.storage.configured ? "KV storage فعال است؛ snapshotها قابل ذخیره‌اند." : "KV binding فعال نیست؛ تاریخچه محلی استفاده می‌شود.";
+  };
+
+  const refreshIntegrations = async () => {
+    const endpoint = backendEndpoint("/api/integrations/status", {});
+    if (!endpoint) return;
+    try { renderIntegrationStatus(await fetchJson(endpoint)); }
+    catch (error) { Object.keys({ storage: 1, gsc: 1, ga4: 1, scheduler: 1, rank: 1, backlink: 1 }).forEach(name => { const card = $(`[data-integration-card="${name}"]`); if (card) $("strong", card).textContent = "بدون پاسخ"; }); if ($("#googleOutput")) $("#googleOutput").textContent = `وضعیت backend دریافت نشد: ${error.message}`; }
+  };
+
+  const syncRemoteSnapshot = async report => {
+    const projectEndpoint = backendEndpoint("/api/projects", {});
+    if (!projectEndpoint || !report) return;
+    try {
+      let project = JSON.parse(localStorage.getItem(remoteProjectStorage) || "null");
+      if (!project || project.origin !== report.origin) {
+        const response = await fetchJson(projectEndpoint, postJson({ origin: report.origin || new URL(report.url).origin, name: new URL(report.url).hostname }));
+        project = response.project;
+        localStorage.setItem(remoteProjectStorage, JSON.stringify(project));
+      }
+      await fetchJson(backendEndpoint(`/api/projects/${encodeURIComponent(project.id)}/snapshots`, {}), postJson(report));
+      state.remoteProject = project;
+      if ($("#projectOutput")) $("#projectOutput").textContent = `snapshot ${new Date(report.checkedAt).toLocaleString("fa-IR")} در storage ابری ثبت شد.`;
+    } catch (error) {
+      if ($("#projectOutput") && !/storage_not_configured/i.test(error.message)) $("#projectOutput").textContent = `snapshot ابری ثبت نشد: ${error.message}`;
+    }
+  };
+
+  const loadRemoteHistory = async () => {
+    if (!state.latest) { toast("ابتدا یک crawl واقعی اجرا کن", "error"); return; }
+    try {
+      let project = state.remoteProject || JSON.parse(localStorage.getItem(remoteProjectStorage) || "null");
+      if (!project) { await syncRemoteSnapshot(state.latest); project = state.remoteProject; }
+      const response = await fetchJson(backendEndpoint(`/api/projects/${encodeURIComponent(project.id)}/snapshots`, {}));
+      $("#projectOutput").innerHTML = response.snapshots?.length ? response.snapshots.slice(0, 8).map(item => `<p><b>${esc(new Date(item.checkedAt).toLocaleString("fa-IR"))}</b> · امتیاز ${fa(item.overall)} · ${fa(item.validPages)} صفحه</p>`).join("") : "snapshot ابری پیدا نشد.";
+    } catch (error) { $("#projectOutput").textContent = `تاریخچه ابری در دسترس نیست: ${error.message}`; }
+  };
+
+  const startGoogleOAuth = async service => {
+    try {
+      const response = await fetchJson(backendEndpoint("/api/integrations/google/start", { service }));
+      if (response.authorizationUrl) window.location.href = response.authorizationUrl;
+    } catch (error) { toast(`اتصال ${service.toUpperCase()} آماده نیست: ${error.message}`, "error"); }
+  };
+
+  const shareLatestReport = async () => {
+    if (!state.latest) { toast("ابتدا یک تحلیل واقعی اجرا کن", "error"); return; }
+    try {
+      const response = await fetchJson(backendEndpoint("/api/reports/share", {}), postJson(state.latest));
+      const link = new URL(response.path, getBackendUrl()).href;
+      await navigator.clipboard?.writeText(link);
+      $("#reportOutput").innerHTML = `<b>لینک گزارش ساخته شد.</b><p dir="ltr">${esc(link)}</p><small>اعتبار: ۳۰ روز · کپی در clipboard انجام شد.</small>`;
+    } catch (error) { $("#reportOutput").textContent = `لینک shareable ساخته نشد: ${error.message}`; }
+  };
+
+  const scheduleLatestReport = async () => {
+    if (!state.latest) { toast("ابتدا یک تحلیل واقعی اجرا کن", "error"); return; }
+    try {
+      const response = await fetchJson(backendEndpoint("/api/schedules", {}), postJson({ frequency: "weekly", url: state.latest.url, report: "latest" }));
+      $("#reportOutput").textContent = `زمان‌بندی ثبت شد: ${JSON.stringify(response.data || response)}`;
+    } catch (error) { $("#reportOutput").textContent = `زمان‌بندی فعال نیست: ${error.message}`; }
+  };
+
+  const queryProvider = async kind => {
+    const output = $("#providerOutput");
+    const keywords = $("#rankKeywords")?.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean) || [];
+    output.textContent = "در حال دریافت پاسخ provider…";
+    try {
+      const response = await fetchJson(backendEndpoint(`/api/providers/${kind}`, {}), postJson({ origin: state.latest?.origin || "", keywords, url: state.latest?.url || "" }));
+      output.innerHTML = `<b>منبع: ${esc(response.source)}</b><pre>${esc(JSON.stringify(response.data, null, 2))}</pre>`;
+    } catch (error) { output.textContent = `${kind === "rank" ? "رتبه" : "بک‌لینک"} فعال نیست: ${error.message}`; }
   };
 
   const pageSpeedUrl = (url, strategy) => {
@@ -772,7 +867,9 @@
       const psiDesktopPromise = getPsi(url, "desktop");
       const [crawl, mobile, desktop] = await Promise.all([crawlPromise, psiMobilePromise, psiDesktopPromise]);
       reportProgress("ساخت گزارش نهایی…", limit + 1, limit + 1);
-      renderReport(buildReport(crawl, mobile, desktop));
+      const report = buildReport(crawl, mobile, desktop);
+      renderReport(report);
+      syncRemoteSnapshot(report);
       goTo("dashboard");
       if (!mobile.available && !desktop.available) toast("crawl انجام شد، اما PageSpeed پاسخ نداد؛ هیچ عددی حدس زده نشده است", "error");
     } catch (error) {
@@ -839,6 +936,15 @@
      if (name === "export-csv") exportReport("csv");
      if (name === "export-html") exportReport("html");
      if (name === "print-report") printReport();
+     if (name === "refresh-integrations") { goTo("integrations"); refreshIntegrations(); }
+     if (name === "connect-gsc") startGoogleOAuth("gsc");
+     if (name === "connect-ga4") startGoogleOAuth("ga4");
+     if (name === "save-remote-snapshot") { if (state.latest) syncRemoteSnapshot(state.latest); else toast("ابتدا یک تحلیل واقعی اجرا کن", "error"); }
+     if (name === "load-remote-history") loadRemoteHistory();
+     if (name === "share-latest") shareLatestReport();
+     if (name === "schedule-latest") scheduleLatestReport();
+     if (name === "query-rank") queryProvider("rank");
+     if (name === "query-backlinks") queryProvider("backlinks");
     if (name === "keyword") openKeywordTool();
     if (name === "brief") openBriefTool();
     if (name === "competitor") openCompetitorTool();
@@ -882,6 +988,8 @@
       }
    });
 
+  ensurePhaseTwoUi();
+  refreshIntegrations();
   $("#scanForm").addEventListener("submit", runScan);
   $$(".device-tabs button").forEach(button => button.addEventListener("click", () => {
     $$(".device-tabs button").forEach(item => item.classList.remove("active"));
