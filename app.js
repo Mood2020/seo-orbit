@@ -62,6 +62,7 @@
     parsed.search = parsed.search.replace(/utm_[^=]+=[^&]+&?/gi, "").replace(/[?&]$/, "");
     return parsed.toString().replace(/\/$/, "");
   };
+  const comparableUrl = value => String(value || "").replace(/\/$/, "");
 
   const fetchWithTimeout = async (url, options = {}, timeout = 30000) => {
     const controller = new AbortController();
@@ -417,8 +418,8 @@
       const broken = linkAudit.filter(item => !item.unavailable && (item.ok === false || !item.status));
       grouped.set("broken-link", { id: "broken-link", label: "لینک‌های شکسته یا غیرقابل بررسی", passed: false, detail: `${fa(broken.length)} URL داخلی خارج از سقف crawl با probe بررسی شد`, weight: 13, severity: "critical", count: broken.length, pages: broken.map(item => item.url) });
     }
-    if (validPages.some(page => page.redirected || page.finalUrl !== page.url)) {
-      const redirects = validPages.filter(page => page.redirected || page.finalUrl !== page.url);
+    if (validPages.some(page => page.redirected || comparableUrl(page.finalUrl) !== comparableUrl(page.url))) {
+      const redirects = validPages.filter(page => page.redirected || comparableUrl(page.finalUrl) !== comparableUrl(page.url));
       grouped.set("redirect", { id: "redirect", label: "redirect در مسیر صفحات", passed: false, detail: `${fa(redirects.length)} URL با مقصد نهایی متفاوت دریافت شد`, weight: 6, severity: "warning", count: redirects.length, pages: redirects.map(page => page.url) });
     }
     if (validPages.some(page => page.noAlt > 0)) {
@@ -453,8 +454,8 @@
       articles: validPages.filter(page => page.article),
       articleCount: validPages.filter(page => page.article).length,
       articleWords: validPages.reduce((sum, page) => sum + (page.article ? page.articleWords : 0), 0),
-      redirects: validPages.filter(page => page.redirected || page.finalUrl !== page.url).map(page => ({ url: page.url, finalUrl: page.finalUrl, status: page.status })),
-      redirectCount: validPages.filter(page => page.redirected || page.finalUrl !== page.url).length,
+      redirects: validPages.filter(page => page.redirected || comparableUrl(page.finalUrl) !== comparableUrl(page.url)).map(page => ({ url: page.url, finalUrl: page.finalUrl, status: page.status })),
+      redirectCount: validPages.filter(page => page.redirected || comparableUrl(page.finalUrl) !== comparableUrl(page.url)).length,
       linkAudit,
       brokenLinks: linkAudit.filter(item => !item.unavailable && (item.ok === false || !item.status)),
       brokenLinkCount: linkAudit.filter(item => !item.unavailable && (item.ok === false || !item.status)).length,
