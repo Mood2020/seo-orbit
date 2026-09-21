@@ -7,7 +7,14 @@
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   const state = { latest: null, currentUrl: "", activeRun: null };
   const psiKeyStorage = "orbit-pagespeed-key";
+  const backendStorage = "orbit-api-url";
   const getPsiKey = () => localStorage.getItem(psiKeyStorage) || "";
+  const getBackendUrl = () => (localStorage.getItem(backendStorage) || "").trim().replace(/\/$/, "");
+  const backendEndpoint = (path, params) => {
+    const base = getBackendUrl();
+    if (!base) return "";
+    return `${base}${path}?${new URLSearchParams(params)}`;
+  };
 
   const toast = (message, type = "success") => {
     const node = $("#toast");
@@ -68,17 +75,25 @@
       ["corsproxy", `https://corsproxy.io/?${encodeURIComponent(url)}`],
       ["codetabs", `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`]
     ];
+    const backend = backendEndpoint("/api/fetch", { url });
+    if (backend) candidates.unshift(["orbit-backend", backend]);
     const errors = [];
     for (const [source, requestUrl] of candidates) {
       try {
         const response = await fetchWithTimeout(requestUrl, {}, source === "direct" ? 12000 : 24000);
-        if (!response.ok) { errors.push(`${source}:${response.status}`); continue; }
+        if (!response.ok) {
+          const body = await response.text();
+          let detail = "";
+          try { detail = JSON.parse(body)?.error?.message || ""; } catch { /* Plain upstream error. */ }
+          errors.push(`${source}:${response.status}${detail ? `:${detail}` : ""}`);
+          continue;
+        }
         const text = await response.text();
         if (!text.trim()) { errors.push(`${source}:empty`); continue; }
         return { url, text, ms: Math.round(performance.now() - started), status: response.status, source };
       } catch (error) { errors.push(`${source}:${error.name === "AbortError" ? "timeout" : error.message}`); }
     }
-    throw new Error(`دریافت ${url} ناموفق بود (${errors.join(" | ")})`);
+    throw new Error(`دریافت ${url} ناموفق بود (${errors.join(" | ")})${getBackendUrl() ? "" : "؛ برای تحلیل پایدار، آدرس backend را در تنظیمات وارد کن."}`);
   };
 
   const fetchJson = async url => {
@@ -95,7 +110,7 @@
     ["performance", "seo", "accessibility", "best-practices"].forEach(category => params.append("category", category));
     const key = getPsiKey();
     if (key) params.set("key", key);
-    return `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?${params}`;
+    return getBackendUrl() ? `${getBackendUrl()}/api/pagespeed?${params}` : `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?${params}`;
   };
 
   const categoryScore = (data, category) => {
@@ -580,7 +595,7 @@
 
   const openKeywordTool = () => openModal("خوشه‌ساز کلمات کلیدی", `<p class="tool-hint">هر کلمه را در یک خط وارد کن. گروه‌بندی بر اساس اشتراک واقعی واژه‌ها انجام می‌شود و حجم جست‌وجو حدس زده نمی‌شود.</p><textarea id="keywordInput" class="tool-textarea" rows="8" placeholder="طراحی سایت\nطراحی سایت فروشگاهی\nسئو تکنیکال\nچک لیست سئو تکنیکال"></textarea><button class="primary-button" id="clusterRun">ساخت خوشه‌ها</button><div id="toolOutput" class="tool-output"></div>`);
 
-  const openSettings = () => openModal("تنظیمات منابع داده", `<p class="tool-hint">کلید فقط در حافظه همین مرورگر ذخیره می‌شود و داخل کد عمومی یا گزارش‌ها قرار نمی‌گیرد. بدون کلید هم درخواست عمومی PageSpeed امتحان می‌شود، اما Google ممکن است quota محدود اعمال کند.</p><label class="tool-label" for="psiApiKey">Google PageSpeed API key اختیاری</label><input id="psiApiKey" class="tool-input" type="password" autocomplete="off" value="${esc(getPsiKey())}" placeholder="AIza..."><button class="primary-button" id="savePsiKey">ذخیره کلید</button><div id="toolOutput" class="tool-output">${getPsiKey() ? "کلید در همین مرورگر ذخیره شده است." : "هنوز کلیدی ذخیره نشده است."}</div>`);
+  const openSettings = () => openModal("تنظیمات منابع داده", `<p class="tool-hint">برای crawl پایدار، آدرس Worker را وارد کن. GitHub Pages خودش backend اجرا نمی‌کند. این آدرس و کلید فقط در همین مرورگر ذخیره می‌شوند.</p><label class="tool-label" for="backendUrl">آدرس backend</label><input id="backendUrl" class="tool-input" type="url" autocomplete="off" value="${esc(getBackendUrl())}" placeholder="https://orbit-seo-api.example.workers.dev"><label class="tool-label" for="psiApiKey">Google PageSpeed API key اختیاری</label><input id="psiApiKey" class="tool-input" type="password" autocomplete="off" value="${esc(getPsiKey())}" placeholder="AIza..."><button class="primary-button" id="savePsiKey">ذخیره تنظیمات</button><div id="toolOutput" class="tool-output">${getBackendUrl() ? "backend تنظیم شده است." : "backend هنوز تنظیم نشده است."}</div>`);
 
   const openBriefTool = () => {
     const page = state.latest?.root;
@@ -705,13 +720,16 @@
       $("#toolOutput").innerHTML = `<div class="brief-result"><b>بریف ${esc(keyword)}</b><p>عنوان پیشنهادی: ${esc(keyword)} | راهنمای کامل، کاربردی و به‌روز</p><p>ساختار پیشنهادی: مقدمه · تعریف مسئله · مقایسه راهکارها · مراحل اجرا · FAQ · CTA</p><p>پوشش فعلی صفحه: ${fa(page?.words || 0)} کلمه · ${fa(page?.headings?.length || 0)} زیرعنوان · ${page?.schema ? "Schema دارد" : "Schema ندارد"}</p></div>`;
     }
      if (event.target.id === "competitorRun") runCompetitor();
-     if (event.target.id === "savePsiKey") {
-       const key = $("#psiApiKey")?.value.trim() || "";
-       if (key) localStorage.setItem(psiKeyStorage, key);
-       else localStorage.removeItem(psiKeyStorage);
-       closeModal();
-       toast(key ? "کلید PageSpeed فقط روی همین مرورگر ذخیره شد" : "کلید PageSpeed پاک شد");
-     }
+      if (event.target.id === "savePsiKey") {
+        const backend = $("#backendUrl")?.value.trim().replace(/\/$/, "") || "";
+        const key = $("#psiApiKey")?.value.trim() || "";
+        if (backend) localStorage.setItem(backendStorage, backend);
+        else localStorage.removeItem(backendStorage);
+        if (key) localStorage.setItem(psiKeyStorage, key);
+        else localStorage.removeItem(psiKeyStorage);
+        closeModal();
+        toast(backend ? "تنظیمات backend و PageSpeed در همین مرورگر ذخیره شد" : "تنظیمات backend پاک شد؛ fallback عمومی فعال است");
+      }
    });
 
   $("#scanForm").addEventListener("submit", runScan);

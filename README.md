@@ -19,6 +19,7 @@
 - فهرست مقاله‌ها با تشخیص JSON-LD، metadata، ساختار `article` و الگوی URL؛ شامل عنوان، URL، نوع، تاریخ، نویسنده، دسته، کلمات و لینک‌های ورودی
 - crawl قابل تنظیم از ۱۰۰ تا ۱۰۰۰ URL و خروجی جداگانه CSV/JSON برای مقاله‌ها
 - امکان ذخیره اختیاری کلید PageSpeed در حافظه محلی مرورگر برای عبور از quota عمومی Google
+- backend آماده Cloudflare Worker در `backend/` برای fetch امن HTML و proxy رسمی PageSpeed
 - PWA قابل نصب روی موبایل و دسکتاپ
 - APK اندروید با GitHub Actions
 
@@ -32,4 +33,4 @@
 
 ## محدودیت فنی نسخه GitHub Pages
 
-GitHub Pages بک‌اند ندارد. PageSpeed از API رسمی Google و crawl HTML از یک مسیر واسط عمومی استفاده می‌کند. اگر یک صفحه یا API پاسخ ندهد، همان صفحه در گزارش failed/partial ثبت می‌شود و امتیاز حدسی تولید نمی‌شود. برای crawl بدون واسط، هزاران URL، اتصال OAuth به Search Console/GA4، rank tracking و زمان‌بندی crawl باید یک API امن یا Cloudflare Worker اضافه شود؛ کلیدهای Google نباید داخل کد عمومی قرار بگیرند.
+GitHub Pages بک‌اند ندارد. برای تحلیل پایدار، Worker داخل `backend/` را deploy کن و آدرس آن را از تنظیمات داشبورد وارد کن. Worker fetch HTML را با timeout، محدودیت حجم، CORS و جلوگیری از آدرس‌های private انجام می‌دهد و PageSpeed را از API رسمی Google عبور می‌دهد. اگر backend تنظیم نشده باشد، fallbackهای عمومی امتحان می‌شوند و در صورت شکست علت واقعی نمایش داده می‌شود؛ امتیاز حدسی تولید نمی‌شود. برای هزاران URL، اتصال OAuth به Search Console/GA4، rank tracking و زمان‌بندی crawl باید سرویس داده جداگانه اضافه شود.

@@ -1,0 +1,6 @@
+name = "orbit-seo-api"
+main = "worker.js"
+compatibility_date = "2026-09-21"
+
+[vars]
+# Optional. Set PAGESPEED_API_KEY as a secret in production instead.
