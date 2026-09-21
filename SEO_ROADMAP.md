@@ -14,7 +14,7 @@ The reference products consistently expose these capability groups:
 
 ## Current honest scope
 
-The static Pages client can provide a real bounded crawl, HTML audit, PageSpeed results, content extraction, deterministic scoring and browser-local history. It cannot safely provide Google OAuth, persistent scheduled jobs, large crawls, live rank positions, search volume or backlink indexes without a server-side data service.
+The static Pages client now provides a real bounded crawl, HTML audit, link probe contract, redirect/image/Schema findings, content extraction, deterministic scoring, browser-local history, HTML/CSV/JSON exports and local-on-next-crawl alerts. It cannot safely provide Google OAuth, persistent scheduled jobs, large crawls, live rank positions, search volume or backlink indexes without a server-side data service.
 
 ## Target architecture
 

@@ -8,6 +8,8 @@
 - خزش گرافی چندمرحله‌ای با عمق صفحه، لینک‌های ورودی، صفحات یتیم و لینک‌های خارجی
 - خواندن robots.txt، استخراج sitemap و احترام به مسیرهای Disallow
 - بررسی تک‌تک صفحات دریافت‌شده: title، meta description، H1، headingها، تصاویر بدون alt، canonical، robots، viewport، زبان، تعداد کلمات، Schema، Open Graph، لینک داخلی و لینک خارجی
+- ممیزی پیشرفته تصاویر (alt، فرمت مدرن و lazy loading)، JSON-LD نامعتبر، redirectهای واقعی و فرصت‌های لینک‌سازی داخلی
+- probe لینک‌های خارج از سقف crawl از مسیر `/api/probe`؛ اگر endpoint در Worker فعال نباشد، کلاینت آن را به‌عنوان «داده در دسترس نیست» نشان می‌دهد، نه لینک شکسته
 - تشخیص title، meta description و H1 تکراری و ثبت صفحات غیرقابل دریافت به‌عنوان مسئله قابل اقدام
 - امتیازدهی deterministic با وزن‌های مشخص؛ هیچ عدد تصادفی یا fallback نمایشی وجود ندارد
 - PageSpeed Insights / Lighthouse واقعی Google برای موبایل و دسکتاپ، Core Web Vitals و فرصت‌های سرعت
@@ -15,11 +17,12 @@
 - خوشه‌ساز واقعی کلمات بر اساس اشتراک واژه‌ها
 - ساخت بریف محتوا از عنوان، هدینگ‌ها و حجم واقعی صفحه تحلیل‌شده
 - مقایسه crawl واقعی دو دامنه با سقف یکسان
-- خروجی JSON و CSV گزارش و نگهداری تاریخچه تحلیل در مرورگر
+- خروجی JSON، CSV و HTML قابل‌اشتراک، مسیر چاپ/ذخیره PDF و نگهداری تاریخچه تحلیل در مرورگر با روند واقعی snapshotها
+- هشدار محلی هنگام crawl بعدی برای افت امتیاز یا افزایش مشکلات؛ این قابلیت جایگزین cron یا monitoring سمت‌سرور نیست
 - فهرست مقاله‌ها با تشخیص JSON-LD، metadata، ساختار `article` و الگوی URL؛ شامل عنوان، URL، نوع، تاریخ، نویسنده، دسته، کلمات و لینک‌های ورودی
 - crawl قابل تنظیم از ۱۰۰ تا ۱۰۰۰ URL و خروجی جداگانه CSV/JSON برای مقاله‌ها
 - امکان ذخیره اختیاری کلید PageSpeed در حافظه محلی مرورگر برای عبور از quota عمومی Google
-- backend آماده Cloudflare Worker در `backend/` برای fetch امن HTML و proxy رسمی PageSpeed؛ Worker فعلی: `https://orbit-seo-api.newtazn.workers.dev`
+- backend آماده Cloudflare Worker در `backend/` برای fetch امن HTML، probe لینک و proxy رسمی PageSpeed؛ Worker فعلی: `https://orbit-seo-api.newtazn.workers.dev`
 - PWA قابل نصب روی موبایل و دسکتاپ
 - APK اندروید با GitHub Actions
 - APK با پوسته موبایلی اختصاصی، ناوبری پایین، هدر برند و آیکون Orbit مستقل از ظاهر دسکتاپ وب

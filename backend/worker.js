@@ -6,7 +6,7 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
-  "Access-Control-Expose-Headers": "X-Orbit-Source, X-Orbit-Status"
+  "Access-Control-Expose-Headers": "X-Orbit-Source, X-Orbit-Status, X-Orbit-Final-Url, X-Orbit-Redirected, X-Orbit-Url"
 };
 
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), {
@@ -84,12 +84,28 @@ const handleFetch = async (request, env) => {
         "Content-Type": response.headers.get("content-type") || "text/html; charset=utf-8",
         "X-Orbit-Source": "cloudflare-worker",
         "X-Orbit-Status": String(response.status),
+        "X-Orbit-Final-Url": response.url || target.toString(),
+        "X-Orbit-Redirected": String(Boolean(response.redirected)),
         "X-Orbit-Url": target.toString()
       }
     });
   } catch (err) {
     const message = err.name === "AbortError" ? "دریافت صفحه timeout شد." : err.message || "دریافت صفحه ناموفق بود.";
     return error(502, "upstream_fetch_failed", message, { url: target.toString() });
+  }
+};
+
+const handleProbe = async request => {
+  let target;
+  try { target = parseTarget(new URL(request.url).searchParams.get("url")); }
+  catch (err) { return error(400, "invalid_url", err.message); }
+  try {
+    const headers = { Accept: "text/html,application/xhtml+xml", "User-Agent": "OrbitSEO/1.3 (+https://mood2020.github.io/seo-orbit/)" };
+    let response = await withTimeout(new Request(target.toString(), { method: "HEAD", headers }), 20000);
+    if (response.status === 405) response = await withTimeout(new Request(target.toString(), { headers }), 20000);
+    return json({ url: target.toString(), status: response.status, ok: response.ok, finalUrl: response.url || target.toString(), redirected: Boolean(response.redirected), contentType: response.headers.get("content-type") || "" }, 200, { "X-Orbit-Source": "cloudflare-worker" });
+  } catch (err) {
+    return error(502, "probe_failed", err.name === "AbortError" ? "بررسی لینک timeout شد." : err.message || "بررسی لینک ناموفق بود.", { url: target.toString() });
   }
 };
 
@@ -117,8 +133,9 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
     if (request.method !== "GET") return error(405, "method_not_allowed", "فقط درخواست GET قابل استفاده است.");
     const url = new URL(request.url);
-    if (url.pathname === "/health") return json({ ok: true, service: "orbit-seo-api", version: "1.3.0", time: new Date().toISOString() });
+      if (url.pathname === "/health") return json({ ok: true, service: "orbit-seo-api", version: "1.4.0", time: new Date().toISOString() });
     if (url.pathname === "/api/fetch") return handleFetch(request, env);
+    if (url.pathname === "/api/probe") return handleProbe(request);
     if (url.pathname === "/api/pagespeed") return handlePageSpeed(request, env);
     return error(404, "not_found", "مسیر API پیدا نشد.");
   }

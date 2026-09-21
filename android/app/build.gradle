@@ -1,6 +1,6 @@
 plugins { id 'com.android.application' }
 
 android { namespace 'com.mood2020.orbitseo'; compileSdk 35
-    defaultConfig { applicationId 'com.mood2020.orbitseo'; minSdk 23; targetSdk 35; versionCode 3; versionName '1.3.0' }
+    defaultConfig { applicationId 'com.mood2020.orbitseo'; minSdk 23; targetSdk 35; versionCode 4; versionName '1.4.0' }
     buildTypes { release { minifyEnabled false; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro' } }
 }

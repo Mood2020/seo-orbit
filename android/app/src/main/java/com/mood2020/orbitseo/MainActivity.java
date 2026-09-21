@@ -1,8 +1,16 @@
 package com.mood2020.orbitseo;
 
+import android.Manifest;
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
+import android.webkit.JavascriptInterface;
 import android.view.View;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -18,6 +26,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 41);
+        }
         getWindow().setStatusBarColor(Color.rgb(8, 17, 31));
         getWindow().setNavigationBarColor(Color.rgb(8, 17, 31));
         webView = new WebView(this);
@@ -33,6 +44,7 @@ public class MainActivity extends Activity {
         settings.setTextZoom(100);
         settings.setLoadWithOverviewMode(false);
         settings.setUseWideViewPort(false);
+        webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -101,18 +113,40 @@ public class MainActivity extends Activity {
                 + ".android-brand-mark{width:38px;height:38px;border-radius:12px;box-shadow:0 6px 16px rgba(91,129,255,.26);}" 
                 + ".android-brand b{display:block;font:800 15px/1 \\\"DM Sans\\\",sans-serif;letter-spacing:.12em;}"
                 + ".android-brand small{display:block;margin-top:5px;color:#8798b8;font:500 8px/1 \\\"DM Sans\\\",sans-serif;letter-spacing:.12em;}"
-                + ".android-header-label{padding:7px 10px;border:1px solid #233653;border-radius:99px;color:#aebdde;font-size:9px;background:#101e32;}"
+                 + ".android-header-label{padding:7px 10px;border:1px solid #233653;border-radius:99px;color:#aebdde;font-size:9px;background:#101e32;}"
+                 + ".android-share{padding:8px 10px;border:1px solid #385992;border-radius:10px;color:#dce6ff;background:#182b4b;font:500 9px \"Vazirmatn\",sans-serif;}"
                 + ".android-bottom-nav{position:fixed;z-index:21;right:10px;bottom:10px;left:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:7px;border:1px solid rgba(255,255,255,.08);border-radius:20px;color:#91a1bd;background:rgba(8,17,31,.96);box-shadow:0 12px 30px rgba(8,17,31,.25);direction:rtl;}"
                 + ".android-bottom-nav button{min-height:48px;border-radius:14px;color:#91a1bd;background:transparent;font:500 9px \\\"Vazirmatn\\\",sans-serif;}"
                 + ".android-bottom-nav button span{display:block;margin-bottom:4px;font-size:17px;line-height:1;}"
                 + ".android-bottom-nav button.active{color:#fff;background:#20365b;box-shadow:inset 0 0 0 1px #385992;}"
                 + "\";var style=document.createElement('style');style.textContent=css;document.head.appendChild(style);"
                 + "var header=document.createElement('header');header.className='android-header';"
-                + "header.innerHTML=\"<div class='android-brand'><svg class='android-brand-mark' viewBox='0 0 64 64' aria-hidden='true'><rect width='64' height='64' rx='16' fill='#14294a'/><ellipse cx='32' cy='32' rx='22' ry='12' fill='none' stroke='#6f91ff' stroke-width='3' transform='rotate(-28 32 32)'/><path d='M20 42V32M32 46V23M44 37V28' stroke='#f5b86b' stroke-width='5' stroke-linecap='round'/><circle cx='47' cy='15' r='4' fill='#f5b86b'/></svg><span><b>ORBIT</b><small>SEO COMMAND CENTER</small></span></div><span class='android-header-label'>تحلیل واقعی</span>\";document.body.prepend(header);"
+                 + "header.innerHTML=\"<div class='android-brand'><svg class='android-brand-mark' viewBox='0 0 64 64' aria-hidden='true'><rect width='64' height='64' rx='16' fill='#14294a'/><ellipse cx='32' cy='32' rx='22' ry='12' fill='none' stroke='#6f91ff' stroke-width='3' transform='rotate(-28 32 32)'/><path d='M20 42V32M32 46V23M44 37V28' stroke='#f5b86b' stroke-width='5' stroke-linecap='round'/><circle cx='47' cy='15' r='4' fill='#f5b86b'/></svg><span><b>ORBIT</b><small>SEO COMMAND CENTER</small></span></div><div><button class='android-share' type='button'>اشتراک</button><span class='android-header-label'>تحلیل واقعی</span></div>\";document.body.prepend(header);"
+                 + "header.querySelector('.android-share').addEventListener('click',function(){var text=document.title+'\\n'+location.href;if(window.AndroidBridge&&window.AndroidBridge.shareReport)window.AndroidBridge.shareReport(text);else if(navigator.share)navigator.share({title:document.title,url:location.href});else if(navigator.clipboard)navigator.clipboard.writeText(text);});"
                 + "var nav=document.createElement('nav');nav.className='android-bottom-nav';nav.innerHTML=\"<button data-android-view='dashboard' class='active'><span>⌂</span>نمای کلی</button><button data-android-view='articles'><span>▤</span>مقالات</button><button data-android-view='technical'><span>⌁</span>فنی</button><button data-android-view='performance'><span>↗</span>سرعت</button>\";document.body.appendChild(nav);"
-                + "function activate(view){var original=document.querySelector('[data-view=\\\"'+view+'\\\"]');if(original)original.click();nav.querySelectorAll('button').forEach(function(item){item.classList.toggle('active',item.getAttribute('data-android-view')===view);});window.scrollTo(0,0);}"
-                + "nav.addEventListener('click',function(event){var button=event.target.closest('button[data-android-view]');if(button)activate(button.getAttribute('data-android-view'));});"
-                + "})();";
+                 + "function activate(view){var original=document.querySelector('[data-view=\\\"'+view+'\\\"]');if(original)original.click();nav.querySelectorAll('button').forEach(function(item){item.classList.toggle('active',item.getAttribute('data-android-view')===view);});window.scrollTo(0,0);}"
+                 + "nav.addEventListener('click',function(event){var button=event.target.closest('button[data-android-view]');if(button)activate(button.getAttribute('data-android-view'));});"
+                 + "var lastScanStatus='';setInterval(function(){var status=document.querySelector('#scanStatus');var value=status?status.textContent:'';if(value&&value!==lastScanStatus&&value.indexOf('گزارش آماده')===0){lastScanStatus=value;if(window.AndroidBridge&&window.AndroidBridge.notifyScan)window.AndroidBridge.notifyScan(value);}},1000);"
+                 + "})();";
+    }
+
+    private final class AndroidBridge {
+        @JavascriptInterface
+        public void shareReport(String text) {
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_TEXT, text);
+            startActivity(Intent.createChooser(send, "اشتراک گزارش Orbit"));
+        }
+
+        @JavascriptInterface
+        public void notifyScan(String message) {
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return;
+            NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(new NotificationChannel("orbit_scan", "Orbit SEO", NotificationManager.IMPORTANCE_DEFAULT));
+            Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(MainActivity.this, "orbit_scan") : new Notification.Builder(MainActivity.this);
+            manager.notify(1001, builder.setSmallIcon(R.drawable.ic_orbit_logo).setContentTitle("Orbit SEO").setContentText(message).setAutoCancel(true).build());
+        }
     }
 
     @Override
