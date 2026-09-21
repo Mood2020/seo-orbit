@@ -7,7 +7,7 @@
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   const state = { latest: null, currentUrl: "", activeRun: null };
   const psiKeyStorage = "orbit-pagespeed-key";
-  const backendStorage = "orbit-api-url";
+  const backendStorage = "orbit-api-url-v2";
   const defaultBackendUrl = "https://orbit-seo-api.newtazn.workers.dev";
   const getPsiKey = () => localStorage.getItem(psiKeyStorage) || "";
   const getBackendUrl = () => (localStorage.getItem(backendStorage) || defaultBackendUrl).trim().replace(/\/$/, "");
