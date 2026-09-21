@@ -107,7 +107,7 @@
     if (parserError) return [];
     return [...doc.querySelectorAll("url > loc, sitemap > loc")].map(node => node.textContent.trim()).filter(value => {
       try { return new URL(value, baseUrl).protocol.startsWith("http"); } catch { return false; }
-    }).map(value => new URL(value, baseUrl).toString().replace(/#.*$/, ""));
+    }).map(value => new URL(value, baseUrl).toString().replace(/#.*$/, "").replace(/\/$/, ""));
   };
 
   const isBlocked = (url, rules) => {
@@ -117,17 +117,25 @@
 
   const isHtmlCandidate = url => !/\.(?:pdf|zip|rar|7z|jpe?g|png|gif|webp|svg|ico|css|js|xml|json|txt|mp4|mp3|woff2?)(?:$|\?)/i.test(new URL(url).pathname);
 
-  const discoverLinks = (html, pageUrl) => {
+  const extractLinks = (html, pageUrl) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const origin = new URL(pageUrl).origin;
-    return [...doc.querySelectorAll("a[href]")].map(node => {
+    const internal = new Set();
+    const external = new Set();
+    [...doc.querySelectorAll("a[href]")].forEach(node => {
       try {
         const target = new URL(node.getAttribute("href"), pageUrl);
         target.hash = "";
-        return target.toString().replace(/\/$/, "");
-      } catch { return null; }
-    }).filter(url => url && new URL(url).origin === origin && isHtmlCandidate(url));
+        const url = target.toString().replace(/\/$/, "");
+        if (!/^https?:$/i.test(target.protocol)) return;
+        if (target.origin === origin && isHtmlCandidate(url)) internal.add(url);
+        else if (target.origin !== origin) external.add(url);
+      } catch { /* Ignore malformed href values. */ }
+    });
+    return { internal: [...internal], external: [...external] };
   };
+
+  const discoverLinks = (html, pageUrl) => extractLinks(html, pageUrl).internal;
 
   const textLength = value => String(value || "").trim().length;
   const check = (id, label, passed, detail, weight, severity = "warning") => ({ id, label, passed, detail, weight, severity });
@@ -141,8 +149,8 @@
     const images = [...doc.images];
     const noAlt = images.filter(image => !image.hasAttribute("alt") || !image.alt.trim()).length;
     const imageAltRate = images.length ? Math.round(((images.length - noAlt) / images.length) * 100) : 100;
-    const links = [...doc.querySelectorAll("a[href]")];
-    const internalLinks = discoverLinks(html, url).length;
+    const links = extractLinks(html, url);
+    const internalLinks = links.internal.length;
     const canonical = doc.querySelector('link[rel="canonical"]')?.href || "";
     const robots = doc.querySelector('meta[name="robots"]')?.content.toLowerCase() || "";
     const viewport = Boolean(doc.querySelector('meta[name="viewport"]'));
@@ -171,7 +179,7 @@
       check("og", "Open Graph", openGraph >= 2, `${fa(openGraph)} مورد از ۳ مورد اصلی`, 8)
     ];
     const score = checks => Math.round(checks.reduce((sum, item) => sum + (item.passed ? item.weight : 0), 0) / checks.reduce((sum, item) => sum + item.weight, 0) * 100);
-    return { url, title, description, h1, headings, words, images: images.length, noAlt, imageAltRate, internalLinks, canonical, robots, viewport, lang, schema, openGraph, technicalScore: score(technicalChecks), contentScore: score(contentChecks), technicalChecks, contentChecks, ms: meta.ms || 0 };
+    return { url, title, description, h1, headings, words, images: images.length, noAlt, imageAltRate, internalLinks, internalUrls: links.internal, externalLinks: links.external.length, canonical, robots, viewport, lang, schema, openGraph, depth: meta.depth || 0, inboundLinks: 0, orphan: false, technicalScore: score(technicalChecks), contentScore: score(contentChecks), technicalChecks, contentChecks, ms: meta.ms || 0 };
   };
 
   const reportProgress = (message, current = 0, total = 1) => {
@@ -216,7 +224,7 @@
     const origin = new URL(baseUrl).origin;
     onProgress("در حال دریافت صفحه اصلی…", 0, limit + 1);
     const rootResponse = await fetchText(baseUrl);
-    const rootPage = inspectPage(rootResponse.text, baseUrl, rootResponse);
+    const rootPage = inspectPage(rootResponse.text, baseUrl, { ...rootResponse, depth: 0 });
     let robots = { disallow: [], sitemaps: [] };
     let robotsStatus = "در دسترس نیست";
     try {
@@ -226,24 +234,85 @@
     } catch { robotsStatus = "یافت نشد یا قابل دریافت نیست"; }
     let sitemapUrls = robots.sitemaps.length ? robots.sitemaps : [`${origin}/sitemap.xml`];
     const sitemapPages = await collectSitemapUrls(sitemapUrls, baseUrl, limit * 3);
-    const discovered = [...new Set([baseUrl, ...sitemapPages, ...discoverLinks(rootResponse.text, baseUrl)])]
-      .filter(url => new URL(url).origin === origin && !isBlocked(url, robots) && isHtmlCandidate(url)).slice(0, limit);
-    const remaining = discovered.filter(url => url !== baseUrl);
-    const pageResults = await concurrency(remaining, async (url, index) => {
-      onProgress(`در حال بررسی صفحه ${fa(index + 2)} از ${fa(discovered.length)}…`, index + 1, discovered.length);
+    const queue = [];
+    const queued = new Set([baseUrl]);
+    const enqueue = (url, depth) => {
+      if (queued.has(url) || queue.length + 1 >= limit) return;
       try {
-        const response = await fetchText(url);
-        return inspectPage(response.text, url, response);
-      } catch (error) {
-        return { url, error: error.message, technicalScore: null, contentScore: null, technicalChecks: [], contentChecks: [], ms: 0 };
-      }
-    }, 4);
-    const pages = [rootPage, ...pageResults];
+        if (new URL(url).origin !== origin || isBlocked(url, robots) || !isHtmlCandidate(url)) return;
+        queued.add(url);
+        queue.push({ url, depth });
+      } catch { /* Ignore malformed discovered URLs. */ }
+    };
+    sitemapPages.forEach(url => enqueue(url, 1));
+    discoverLinks(rootResponse.text, baseUrl).forEach(url => enqueue(url, 1));
+    const pages = [rootPage];
+    while (queue.length && pages.length < limit) {
+      const batch = queue.splice(0, Math.min(4, limit - pages.length));
+      const pageResults = await concurrency(batch, async item => {
+        onProgress(`در حال بررسی صفحه ${fa(pages.length + 1)} از ${fa(Math.min(limit, pages.length + queue.length + 1))}…`, pages.length, limit);
+        try {
+          const response = await fetchText(item.url);
+          const page = inspectPage(response.text, item.url, { ...response, depth: item.depth });
+          return page;
+        } catch (error) {
+          return { url: item.url, error: error.message, depth: item.depth, internalUrls: [], externalLinks: 0, technicalScore: null, contentScore: null, technicalChecks: [], contentChecks: [], ms: 0 };
+        }
+      }, 4);
+      pageResults.forEach(page => {
+        pages.push(page);
+        if (!page.error && pages.length < limit) (page.internalUrls || []).forEach(url => enqueue(url, page.depth + 1));
+      });
+    }
     const validPages = pages.filter(page => !page.error);
+    const inbound = new Map();
+    validPages.forEach(page => (page.internalUrls || []).forEach(url => inbound.set(url, (inbound.get(url) || 0) + 1)));
+    validPages.forEach(page => {
+      page.inboundLinks = inbound.get(page.url) || 0;
+      page.orphan = page.url !== baseUrl && page.inboundLinks === 0;
+      if (page.orphan) page.technicalChecks.push(check("orphan", "صفحه یتیم", false, "صفحه در sitemap یا نتایج crawl پیدا شد اما لینک داخلی ورودی ندارد", 8));
+    });
+    const duplicateChecks = [
+      ["title", "عنوان تکراری", "title تکراری با صفحات دیگر", 8],
+      ["description", "توضیحات متای تکراری", "توضیحات متا با صفحات دیگر یکسان است", 6],
+      ["h1", "H1 تکراری", "H1 با صفحات دیگر یکسان است", 5]
+    ];
+    duplicateChecks.forEach(([field, id, label, weight]) => {
+      const groups = new Map();
+      validPages.forEach(page => {
+        const value = field === "h1" ? page.h1[0] : page[field];
+        if (value) groups.set(value, [...(groups.get(value) || []), page]);
+      });
+      groups.forEach(group => {
+        if (group.length < 2) return;
+        group.forEach(page => page.contentChecks.push(check(id, label, false, `${fa(group.length)} صفحه مقدار یکسان دارند`, weight)));
+      });
+    });
+    const weightedScore = checks => checks.length ? Math.round(checks.reduce((sum, item) => sum + (item.passed ? item.weight : 0), 0) / checks.reduce((sum, item) => sum + item.weight, 0) * 100) : null;
+    validPages.forEach(page => {
+      page.technicalScore = weightedScore(page.technicalChecks);
+      page.contentScore = weightedScore(page.contentChecks);
+    });
     const issues = [];
-    const allChecks = validPages.flatMap(page => [...page.technicalChecks, ...page.contentChecks]);
+    const allChecks = validPages.flatMap(page => [...page.technicalChecks, ...page.contentChecks].map(item => ({ ...item, pageUrl: page.url })));
     const grouped = new Map();
-    allChecks.filter(item => !item.passed).forEach(item => grouped.set(item.id, { ...item, count: (grouped.get(item.id)?.count || 0) + 1 }));
+    allChecks.filter(item => !item.passed).forEach(item => {
+      const previous = grouped.get(item.id);
+      grouped.set(item.id, { ...item, count: (previous?.count || 0) + 1, pages: [...(previous?.pages || []), item.pageUrl] });
+    });
+    pages.filter(page => page.error).forEach(page => {
+      const previous = grouped.get("fetch-error");
+      grouped.set("fetch-error", {
+        id: "fetch-error",
+        label: "صفحه قابل دریافت نیست",
+        passed: false,
+        detail: "در مسیر crawl پاسخ قابل استفاده‌ای دریافت نشد",
+        weight: 14,
+        severity: "critical",
+        count: (previous?.count || 0) + 1,
+        pages: [...(previous?.pages || []), page.url]
+      });
+    });
     [...grouped.values()].sort((a, b) => b.weight * b.count - a.weight * a.count).forEach(item => issues.push(item));
     const avg = key => validPages.length ? Math.round(validPages.reduce((sum, page) => sum + (page[key] || 0), 0) / validPages.length) : null;
     return {
@@ -260,6 +329,9 @@
       content: avg("contentScore"),
       issues,
       internalLinks: validPages.reduce((sum, page) => sum + page.internalLinks, 0),
+      externalLinks: validPages.reduce((sum, page) => sum + page.externalLinks, 0),
+      orphanPages: validPages.filter(page => page.orphan).length,
+      maxDepth: validPages.reduce((max, page) => Math.max(max, page.depth || 0), 0),
       words: validPages.reduce((sum, page) => sum + page.words, 0),
       root: rootPage
     };
@@ -295,7 +367,7 @@
   const emptyRow = (message, detail = "پس از اجرای تحلیل واقعی، داده‌ها اینجا نمایش داده می‌شوند.") => `<tr><td colspan="6"><div class="data-empty"><b>${message}</b><small>${detail}</small></div></td></tr>`;
 
   const renderHistory = () => {
-    const history = JSON.parse(localStorage.getItem("orbit-history") || "[]");
+    const history = JSON.parse(localStorage.getItem("orbit-history-v2") || "[]");
     const body = $("#historyBody");
     if (!history.length) { body.innerHTML = emptyRow("هنوز تحلیلی ثبت نشده است."); return; }
     body.innerHTML = history.slice(0, 8).map((item, index) => {
@@ -308,15 +380,15 @@
   const renderTechnical = report => {
     const banner = $(".technical-banner");
     $(".technical-banner b").textContent = report.failedPages ? "بخشی از صفحات قابل دریافت نبودند" : "خزیدن صفحات با داده واقعی انجام شد";
-    $(".technical-banner p").textContent = `${fa(report.validPages)} صفحه بررسی شد · robots.txt: ${report.robots.status} · sitemap: ${fa(report.sitemap.urls)} URL`;
+    $(".technical-banner p").textContent = `${fa(report.validPages)} صفحه بررسی شد · عمق بیشینه ${fa(report.maxDepth)} · ${fa(report.orphanPages)} صفحه یتیم · robots.txt: ${report.robots.status} · sitemap: ${fa(report.sitemap.urls)} URL`;
     $(".banner-score").innerHTML = `${report.technical == null ? "—" : fa(report.technical)}<span>/۱۰۰</span>`;
     if (banner) banner.classList.toggle("partial", Boolean(report.failedPages));
     const cards = $$(".audit-card");
     const checks = report.pages.flatMap(page => page.technicalChecks || []);
     const cardData = [
-      ["ایندکس‌پذیری", "robots، sitemap و پاسخ صفحات", checks.filter(item => ["robots", "response"].includes(item.id))],
+      ["ایندکس‌پذیری", "robots، sitemap و صفحات یتیم", checks.filter(item => ["robots", "response", "orphan"].includes(item.id))],
       ["تجربه موبایل", "viewport و اتصال امن", checks.filter(item => ["viewport", "https"].includes(item.id))],
-      ["لینک‌سازی داخلی", "تعداد مسیرهای داخلی", report.pages.map(page => ({ passed: page.internalLinks > 0 }))],
+      ["لینک‌سازی داخلی", `${fa(report.internalLinks)} لینک داخلی · عمق ${fa(report.maxDepth)}`, report.pages.filter(page => !page.error).map(page => ({ passed: page.internalLinks > 0 && !page.orphan }))],
       ["Canonical", "canonical صفحات و دامنه", checks.filter(item => item.id === "canonical")]
     ];
     cards.forEach((card, index) => {
@@ -337,7 +409,7 @@
     $$(".content-stats small").forEach((node, index) => { node.textContent = ["صفحات تحلیل‌شده", "صفحات با محتوای قوی", "فرصت‌های قابل اقدام"][index]; });
     const keywordList = $(".keyword-list");
     const topPages = report.pages.filter(page => !page.error).sort((a, b) => a.contentScore - b.contentScore).slice(0, 5);
-    keywordList.innerHTML = topPages.length ? topPages.map(page => `<div class="keyword-row"><div><b>${esc(page.title || new URL(page.url).pathname)}</b><small>${fa(page.words)} کلمه · ${fa(page.contentScore)}/۱۰۰ · ${esc(new URL(page.url).pathname || "/")}</small></div><span class="position">${page.contentScore < 70 ? "نیازمند کار" : "قابل قبول"}</span><span class="potential">${fa(page.contentScore)}</span></div>`).join("") : `<div class="data-empty"><b>صفحه‌ای برای نمایش نیست.</b></div>`;
+    keywordList.innerHTML = topPages.length ? topPages.map(page => `<div class="keyword-row"><div><b>${esc(page.title || new URL(page.url).pathname)}</b><small>${fa(page.words)} کلمه · ${fa(page.contentScore)}/۱۰۰ · عمق ${fa(page.depth)} · ${fa(page.inboundLinks)} لینک ورودی</small></div><span class="position">${page.orphan ? "صفحه یتیم" : page.contentScore < 70 ? "نیازمند کار" : "قابل قبول"}</span><span class="potential">${fa(page.contentScore)}</span></div>`).join("") : `<div class="data-empty"><b>صفحه‌ای برای نمایش نیست.</b></div>`;
     const donut = $(".donut span");
     if (donut) donut.innerHTML = `${fa(report.content)}<small>امتیاز محتوا</small>`;
     $(".donut-legend").innerHTML = `<li><i class="dot purple-dot"></i>صفحات بررسی‌شده <b>${fa(report.validPages)}</b></li><li><i class="dot orange-dot"></i>کلمات متن <b>${fa(report.words)}</b></li><li><i class="dot blue-dot"></i>Schema فعال <b>${fa(report.pages.filter(page => page.schema).length)}</b></li>`;
@@ -366,7 +438,7 @@
     scoreText("#performanceScore", report.performance);
     const domain = new URL(report.url).hostname.replace(/^www\./, "");
     $(".welcome-row h1").innerHTML = `گزارش واقعی <span class="wave">✦</span>`;
-    $(".welcome-row .subhead").textContent = `${domain} · ${fa(report.validPages)} صفحه از ${fa(report.pages.length)} صفحه با داده واقعی بررسی شد.`;
+    $(".welcome-row .subhead").textContent = `${domain} · ${fa(report.validPages)} صفحه از ${fa(report.pages.length)} صفحه با داده واقعی بررسی شد · ${fa(report.orphanPages)} صفحه یتیم`;
     $(".scan-copy p").textContent = report.failedPages ? `${fa(report.failedPages)} صفحه قابل دریافت نبود؛ امتیازها فقط از داده‌های موجود محاسبه شده‌اند.` : "تمام اعداد این صفحه از همین crawl و پاسخ Google ساخته شده‌اند.";
     $("#scanStatus").textContent = `گزارش آماده است · ${fa(report.validPages)} صفحه معتبر`;
     $(".score-card .trend").textContent = "snapshot واقعی";
@@ -378,10 +450,10 @@
     renderTechnical(report);
     renderContent(report);
     renderPerformance(report);
-    const history = JSON.parse(localStorage.getItem("orbit-history") || "[]").filter(item => item.url !== report.url);
+    const history = JSON.parse(localStorage.getItem("orbit-history-v2") || "[]").filter(item => item.url !== report.url);
     history.unshift({ url: report.url, score: report.overall, checkedAt: report.checkedAt, partial: Boolean(report.failedPages) });
-    localStorage.setItem("orbit-history", JSON.stringify(history.slice(0, 10)));
-    localStorage.setItem("orbit-last-report", JSON.stringify(report));
+    localStorage.setItem("orbit-history-v2", JSON.stringify(history.slice(0, 10)));
+    localStorage.setItem("orbit-last-report-v2", JSON.stringify(report));
     renderHistory();
     toast(`گزارش واقعی ${domain} آماده شد`);
   };
@@ -501,7 +573,7 @@
     const history = event.target.closest("[data-history-url]");
     if (history) { $("#siteUrl").value = history.dataset.historyUrl; goTo("dashboard"); toast("آدرس برای تحلیل دوباره آماده شد"); return; }
     const issue = event.target.closest("[data-issue-id]");
-    if (issue) { const item = state.latest?.issues.find(row => row.id === issue.dataset.issueId); if (item) openModal(item.label, `<p>${esc(item.detail)}</p><p>تعداد صفحات: <b>${fa(item.count)}</b></p><p class="tool-source">این یافته از چک‌های HTML صفحات دریافت‌شده ساخته شده است.</p>`); return; }
+     if (issue) { const item = state.latest?.issues.find(row => row.id === issue.dataset.issueId); if (item) openModal(item.label, `<p>${esc(item.detail)}</p><p>تعداد صفحات: <b>${fa(item.count)}</b></p>${item.pages?.length ? `<div class="tool-output">${item.pages.slice(0, 20).map(url => `<div><a href="${esc(url)}" target="_blank" rel="noreferrer">${esc(url)}</a></div>`).join("")}</div>` : ""}<p class="tool-source">این یافته از چک‌های HTML صفحات دریافت‌شده ساخته شده است.</p>`); return; }
     const filter = event.target.closest("[data-issue-filter]");
     if (filter && state.latest) {
       $$("[data-issue-filter]").forEach(item => item.classList.toggle("active", item === filter));
@@ -519,7 +591,7 @@
     if (name === "brief") openBriefTool();
     if (name === "competitor") openCompetitorTool();
     if (name === "settings") openModal("تنظیمات و منابع داده", `<p>منابع فعال این نسخه:</p><ul class="tool-list"><li>HTML از مسیر واسط عمومی برای crawl</li><li>Google PageSpeed Insights برای Lighthouse</li><li>ذخیره گزارش در همین مرورگر</li></ul><p class="tool-source">برای crawl بدون واسط و Search Console/GA4 باید یک API امن سمت سرور اضافه شود.</p>`);
-    if (name === "all-history") openModal("آرشیو تحلیل‌ها", `<div class="tool-output">${JSON.parse(localStorage.getItem("orbit-history") || "[]").map(item => `<p><b>${esc(item.url)}</b><br><small>${fa(item.score)} · ${new Date(item.checkedAt).toLocaleString("fa-IR")}</small></p>`).join("") || "هنوز گزارشی ذخیره نشده است."}</div>`);
+    if (name === "all-history") openModal("آرشیو تحلیل‌ها", `<div class="tool-output">${JSON.parse(localStorage.getItem("orbit-history-v2") || "[]").map(item => `<p><b>${esc(item.url)}</b><br><small>${fa(item.score)} · ${new Date(item.checkedAt).toLocaleString("fa-IR")}</small></p>`).join("") || "هنوز گزارشی ذخیره نشده است."}</div>`);
     if (name === "fixes") goTo("technical");
     if (name === "recrawl") { goTo("dashboard"); $("#siteUrl").focus(); }
   });
@@ -546,7 +618,7 @@
     if (data) renderPerformance({ ...state.latest, psi: { mobile: button.textContent.trim() === "دسکتاپ" ? state.latest.psi.mobile : data, desktop: state.latest.psi.desktop } });
   }));
   resetDemoMarkup();
-  const savedLast = JSON.parse(localStorage.getItem("orbit-last-report") || "null");
+  const savedLast = JSON.parse(localStorage.getItem("orbit-last-report-v2") || "null");
   if (savedLast?.pages?.length) renderReport(savedLast);
   else renderHistory();
   if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
