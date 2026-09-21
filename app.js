@@ -6,6 +6,8 @@
   const fa = value => String(value ?? "—").replace(/[0-9]/g, digit => "۰۱۲۳۴۵۶۷۸۹"[digit]);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   const state = { latest: null, currentUrl: "", activeRun: null };
+  const psiKeyStorage = "orbit-pagespeed-key";
+  const getPsiKey = () => localStorage.getItem(psiKeyStorage) || "";
 
   const toast = (message, type = "success") => {
     const node = $("#toast");
@@ -60,23 +62,39 @@
 
   const fetchText = async url => {
     const started = performance.now();
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-    const response = await fetchWithTimeout(proxyUrl, {}, 24000);
-    if (!response.ok) throw new Error(`دریافت ${url} با وضعیت ${response.status} شکست خورد`);
-    const text = await response.text();
-    if (!text.trim()) throw new Error(`پاسخ خالی از ${url}`);
-    return { url, text, ms: Math.round(performance.now() - started) };
+    const candidates = [
+      ["direct", url],
+      ["allorigins", `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`],
+      ["corsproxy", `https://corsproxy.io/?${encodeURIComponent(url)}`],
+      ["codetabs", `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`]
+    ];
+    const errors = [];
+    for (const [source, requestUrl] of candidates) {
+      try {
+        const response = await fetchWithTimeout(requestUrl, {}, source === "direct" ? 12000 : 24000);
+        if (!response.ok) { errors.push(`${source}:${response.status}`); continue; }
+        const text = await response.text();
+        if (!text.trim()) { errors.push(`${source}:empty`); continue; }
+        return { url, text, ms: Math.round(performance.now() - started), status: response.status, source };
+      } catch (error) { errors.push(`${source}:${error.name === "AbortError" ? "timeout" : error.message}`); }
+    }
+    throw new Error(`دریافت ${url} ناموفق بود (${errors.join(" | ")})`);
   };
 
   const fetchJson = async url => {
     const response = await fetchWithTimeout(url, {}, 40000);
-    if (!response.ok) throw new Error(`API با وضعیت ${response.status} پاسخ داد`);
-    return response.json();
+    const body = await response.text();
+    let data;
+    try { data = JSON.parse(body); } catch { data = null; }
+    if (!response.ok) throw new Error(data?.error?.message || `API با وضعیت ${response.status} پاسخ داد`);
+    return data || {};
   };
 
   const pageSpeedUrl = (url, strategy) => {
     const params = new URLSearchParams({ url, strategy });
     ["performance", "seo", "accessibility", "best-practices"].forEach(category => params.append("category", category));
+    const key = getPsiKey();
+    if (key) params.set("key", key);
     return `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?${params}`;
   };
 
@@ -140,6 +158,28 @@
   const textLength = value => String(value || "").trim().length;
   const check = (id, label, passed, detail, weight, severity = "warning") => ({ id, label, passed, detail, weight, severity });
 
+  const articleTypes = new Set(["article", "blogposting", "newsarticle", "techarticle", "socialmediaposting"]);
+  const schemaObjects = value => {
+    const result = [];
+    const visit = item => {
+      if (Array.isArray(item)) return item.forEach(visit);
+      if (!item || typeof item !== "object") return;
+      result.push(item);
+      if (item["@graph"]) visit(item["@graph"]);
+    };
+    visit(value);
+    return result;
+  };
+  const jsonLd = doc => [...doc.querySelectorAll('script[type="application/ld+json"]')].flatMap(node => {
+    try { return schemaObjects(JSON.parse(node.textContent || "")); } catch { return []; }
+  });
+  const schemaValue = (value, fallback = "") => {
+    if (Array.isArray(value)) return schemaValue(value[0], fallback);
+    if (value && typeof value === "object") return String(value.name || value.text || value["@id"] || fallback);
+    return value == null ? fallback : String(value);
+  };
+  const countWords = value => String(value || "").trim().split(/\s+/).filter(Boolean).length;
+
   const inspectPage = (html, url, meta = {}) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const title = doc.querySelector("title")?.textContent.trim() || "";
@@ -157,6 +197,22 @@
     const lang = doc.documentElement.lang || "";
     const words = (doc.body?.innerText || "").trim().split(/\s+/).filter(Boolean).length;
     const schema = [...doc.querySelectorAll('script[type="application/ld+json"]')].length;
+    const structuredData = jsonLd(doc);
+    const articleSchema = structuredData.find(item => {
+      const types = Array.isArray(item["@type"]) ? item["@type"] : [item["@type"]];
+      return types.some(type => articleTypes.has(String(type || "").toLowerCase()));
+    });
+    const articleNode = [...doc.querySelectorAll("article")].sort((a, b) => countWords(b.textContent) - countWords(a.textContent)).find(node => countWords(node.textContent) >= 180 && node.querySelector("h1, h2, h3"));
+    const articlePublished = articleSchema?.datePublished || articleSchema?.dateCreated || doc.querySelector('meta[property="article:published_time"], meta[name="datePublished"], meta[itemprop="datePublished"], time[datetime]')?.getAttribute("content") || doc.querySelector("time[datetime]")?.getAttribute("datetime") || "";
+    const articleAuthor = schemaValue(articleSchema?.author, doc.querySelector('meta[name="author"], meta[property="article:author"]')?.content || "");
+    const articleSection = schemaValue(articleSchema?.articleSection, doc.querySelector('meta[property="article:section"], meta[name="category"]')?.content || "");
+    const articlePath = /(?:^|\/)(?:blog|article|articles|news|post|posts|magazine|insights|knowledge|learn|آموزش|مقاله)(?:\/|$)/i.test(new URL(url).pathname);
+    const articleWords = countWords(articleNode?.textContent || articleSchema?.articleBody || doc.querySelector("main")?.textContent || doc.body?.textContent || "");
+    const isArticle = Boolean(articleSchema || (articlePublished && articleWords >= 120) || articleNode || (articlePath && articleWords >= 180 && (h1.length || title)));
+    const articleType = articleSchema ? schemaValue(articleSchema["@type"], "Article") : isArticle ? (articleNode ? "HTML Article" : "URL Article") : "";
+    const articleTitle = schemaValue(articleSchema?.headline || articleSchema?.name, h1[0] || title);
+    const articleReason = articleSchema ? "JSON-LD Article" : articlePublished ? "article metadata" : articleNode ? "semantic article" : articlePath ? "article URL pattern" : "";
+    const articleConfidence = articleSchema || articlePublished ? "high" : articleNode ? "medium" : isArticle ? "low" : "";
     const openGraph = ["og:title", "og:description", "og:image"].filter(name => doc.querySelector(`meta[property="${name}"]`)).length;
     const canonicalOk = !canonical || new URL(canonical, url).origin === new URL(url).origin;
     const technicalChecks = [
@@ -179,7 +235,7 @@
       check("og", "Open Graph", openGraph >= 2, `${fa(openGraph)} مورد از ۳ مورد اصلی`, 8)
     ];
     const score = checks => Math.round(checks.reduce((sum, item) => sum + (item.passed ? item.weight : 0), 0) / checks.reduce((sum, item) => sum + item.weight, 0) * 100);
-    return { url, title, description, h1, headings, words, images: images.length, noAlt, imageAltRate, internalLinks, internalUrls: links.internal, externalLinks: links.external.length, canonical, robots, viewport, lang, schema, openGraph, depth: meta.depth || 0, inboundLinks: 0, orphan: false, technicalScore: score(technicalChecks), contentScore: score(contentChecks), technicalChecks, contentChecks, ms: meta.ms || 0 };
+    return { url, title, description, h1, headings, words, images: images.length, noAlt, imageAltRate, internalLinks, internalUrls: links.internal, externalLinks: links.external.length, canonical, robots, viewport, lang, schema, openGraph, article: isArticle, articleTitle, publishedAt: articlePublished, author: articleAuthor, section: articleSection, articleType, articleWords: isArticle ? articleWords : 0, articleConfidence, articleReason, depth: meta.depth || 0, inboundLinks: 0, orphan: false, technicalScore: score(technicalChecks), contentScore: score(contentChecks), technicalChecks, contentChecks, ms: meta.ms || 0 };
   };
 
   const reportProgress = (message, current = 0, total = 1) => {
@@ -237,7 +293,7 @@
     const queue = [];
     const queued = new Set([baseUrl]);
     const enqueue = (url, depth) => {
-      if (queued.has(url) || queue.length + 1 >= limit) return;
+      if (queued.has(url) || pages.length + queue.length >= limit) return;
       try {
         if (new URL(url).origin !== origin || isBlocked(url, robots) || !isHtmlCandidate(url)) return;
         queued.add(url);
@@ -256,7 +312,7 @@
           const page = inspectPage(response.text, item.url, { ...response, depth: item.depth });
           return page;
         } catch (error) {
-          return { url: item.url, error: error.message, depth: item.depth, internalUrls: [], externalLinks: 0, technicalScore: null, contentScore: null, technicalChecks: [], contentChecks: [], ms: 0 };
+            return { url: item.url, error: error.message, depth: item.depth, internalUrls: [], externalLinks: 0, technicalScore: null, contentScore: null, article: false, articleWords: 0, technicalChecks: [], contentChecks: [], ms: 0 };
         }
       }, 4);
       pageResults.forEach(page => {
@@ -333,6 +389,9 @@
       orphanPages: validPages.filter(page => page.orphan).length,
       maxDepth: validPages.reduce((max, page) => Math.max(max, page.depth || 0), 0),
       words: validPages.reduce((sum, page) => sum + page.words, 0),
+      articles: validPages.filter(page => page.article),
+      articleCount: validPages.filter(page => page.article).length,
+      articleWords: validPages.reduce((sum, page) => sum + (page.article ? page.articleWords : 0), 0),
       root: rootPage
     };
   };
@@ -415,12 +474,32 @@
     $(".donut-legend").innerHTML = `<li><i class="dot purple-dot"></i>صفحات بررسی‌شده <b>${fa(report.validPages)}</b></li><li><i class="dot orange-dot"></i>کلمات متن <b>${fa(report.words)}</b></li><li><i class="dot blue-dot"></i>Schema فعال <b>${fa(report.pages.filter(page => page.schema).length)}</b></li>`;
   };
 
+  const reportArticles = report => report.articles || report.pages.filter(page => page.article);
+  const formatDate = value => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString("fa-IR");
+  };
+  const renderArticles = report => {
+    const articles = reportArticles(report);
+    const categories = new Set(articles.map(article => article.section).filter(Boolean));
+    const count = $("#articleCount");
+    const words = $("#articleWords");
+    const category = $("#articleCategories");
+    if (count) count.textContent = fa(articles.length);
+    if (words) words.textContent = fa(articles.reduce((sum, article) => sum + (article.articleWords || article.words || 0), 0));
+    if (category) category.textContent = fa(categories.size);
+    const body = $("#articleBody");
+    if (!body) return;
+    body.innerHTML = articles.length ? articles.map(article => `<tr><td><b>${esc(article.articleTitle || article.title || "بدون عنوان")}</b><small>${esc(article.url)}</small></td><td>${esc(article.articleType || "Article")}</td><td>${esc(formatDate(article.publishedAt))}</td><td>${esc(article.author || "—")}</td><td>${fa(article.articleWords || article.words || 0)}</td><td>${fa(article.inboundLinks || 0)}</td></tr>`).join("") : `<tr><td colspan="6"><div class="data-empty"><b>مقاله‌ای با شواهد کافی پیدا نشد.</b><small>تشخیص بر اساس JSON-LD، metadata، ساختار article و مسیر URL انجام می‌شود.</small></div></td></tr>`;
+  };
+
   const renderPerformance = report => {
     const mobile = report.psi.mobile;
     const desktop = report.psi.desktop;
     scoreText("#lighthouseScore", mobile.performance);
     const summary = $(".lighthouse-score div:last-child");
-    if (summary) summary.innerHTML = `<b>${mobile.available ? "تست Google دریافت شد" : "تست Google در دسترس نیست"}</b><p>${mobile.available ? `SEO: ${fa(mobile.seo)} · دسترسی: ${fa(mobile.accessibility)} · بهترین‌روش‌ها: ${fa(mobile.bestPractices)}` : esc(mobile.error || "پاسخی از PageSpeed دریافت نشد")}</p><span class="last-run">${mobile.available ? "منبع: Google PageSpeed Insights" : "منبع نامشخص نیست؛ عددی حدس زده نمی‌شود"}</span>`;
+    if (summary) summary.innerHTML = `<b>${mobile.available ? "تست Google دریافت شد" : "تست Google در دسترس نیست"}</b><p>${mobile.available ? `SEO: ${fa(mobile.seo)} · دسترسی: ${fa(mobile.accessibility)} · بهترین‌روش‌ها: ${fa(mobile.bestPractices)}` : esc(mobile.error || "پاسخی از PageSpeed دریافت نشد")}</p><span class="last-run">${mobile.available ? "منبع: Google PageSpeed Insights" : "بدون پاسخ معتبر؛ عددی حدس زده نمی‌شود"}</span>`;
     const metrics = mobile.metrics || {};
     $$(".vitals b").forEach((node, index) => { node.textContent = [metrics.lcp, metrics.cls, metrics.inp][index] || "—"; });
     $$(".vitals span").forEach((node, index) => { node.textContent = [metrics.lcp, metrics.cls, metrics.inp][index] ? "دریافت شد" : "داده ندارد"; });
@@ -449,6 +528,7 @@
     $(".chart-wrap").innerHTML = `<div class="data-empty chart-empty"><b>روند تاریخی بعد از تحلیل‌های بعدی ساخته می‌شود.</b><small>این اولین snapshot واقعی این پروژه است.</small></div>`;
     renderTechnical(report);
     renderContent(report);
+    renderArticles(report);
     renderPerformance(report);
     const history = JSON.parse(localStorage.getItem("orbit-history-v2") || "[]").filter(item => item.url !== report.url);
     history.unshift({ url: report.url, score: report.overall, checkedAt: report.checkedAt, partial: Boolean(report.failedPages) });
@@ -476,6 +556,15 @@
     toast(`گزارش ${format.toUpperCase()} دانلود شد`);
   };
 
+  const exportArticles = (format = "csv") => {
+    if (!state.latest) { toast("ابتدا یک تحلیل واقعی اجرا کن", "error"); return; }
+    const articles = reportArticles(state.latest);
+    const rows = [["url", "title", "type", "published_at", "author", "section", "words", "inbound_links", "confidence"], ...articles.map(article => [article.url, article.articleTitle || article.title, article.articleType, article.publishedAt, article.author, article.section, article.articleWords || article.words, article.inboundLinks, article.articleConfidence])];
+    if (format === "json") saveDownload(`orbit-articles-${new URL(state.latest.url).hostname}.json`, JSON.stringify({ url: state.latest.url, crawledAt: state.latest.crawledAt, articleCount: articles.length, articles }, null, 2), "application/json");
+    else saveDownload(`orbit-articles-${new URL(state.latest.url).hostname}.csv`, rows.map(row => row.map(cell => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\n"), "text/csv;charset=utf-8");
+    toast(`خروجی مقاله‌ها (${format.toUpperCase()}) دانلود شد`);
+  };
+
   const keywordTokens = value => value.toLowerCase().replace(/[،؛,|]+/g, " ").split(/\s+/).map(token => token.trim()).filter(token => token.length > 1);
   const clusterKeywords = keywords => {
     const groups = [];
@@ -490,6 +579,8 @@
   };
 
   const openKeywordTool = () => openModal("خوشه‌ساز کلمات کلیدی", `<p class="tool-hint">هر کلمه را در یک خط وارد کن. گروه‌بندی بر اساس اشتراک واقعی واژه‌ها انجام می‌شود و حجم جست‌وجو حدس زده نمی‌شود.</p><textarea id="keywordInput" class="tool-textarea" rows="8" placeholder="طراحی سایت\nطراحی سایت فروشگاهی\nسئو تکنیکال\nچک لیست سئو تکنیکال"></textarea><button class="primary-button" id="clusterRun">ساخت خوشه‌ها</button><div id="toolOutput" class="tool-output"></div>`);
+
+  const openSettings = () => openModal("تنظیمات منابع داده", `<p class="tool-hint">کلید فقط در حافظه همین مرورگر ذخیره می‌شود و داخل کد عمومی یا گزارش‌ها قرار نمی‌گیرد. بدون کلید هم درخواست عمومی PageSpeed امتحان می‌شود، اما Google ممکن است quota محدود اعمال کند.</p><label class="tool-label" for="psiApiKey">Google PageSpeed API key اختیاری</label><input id="psiApiKey" class="tool-input" type="password" autocomplete="off" value="${esc(getPsiKey())}" placeholder="AIza..."><button class="primary-button" id="savePsiKey">ذخیره کلید</button><div id="toolOutput" class="tool-output">${getPsiKey() ? "کلید در همین مرورگر ذخیره شده است." : "هنوز کلیدی ذخیره نشده است."}</div>`);
 
   const openBriefTool = () => {
     const page = state.latest?.root;
@@ -517,7 +608,7 @@
     const form = event.currentTarget;
     let url;
     try { url = normalizeUrl($("#siteUrl").value); } catch (error) { toast(error.message, "error"); return; }
-    const limit = Number($("#crawlLimit")?.value || 20);
+    const limit = Number($("#crawlLimit")?.value || 100);
     const deep = $("#deepCheck")?.checked !== false;
     form.classList.add("loading");
     state.activeRun = true;
@@ -553,6 +644,10 @@
     $(".keyword-list").innerHTML = `<div class="data-empty"><b>هنوز صفحه‌ای تحلیل نشده است.</b><small>پس از crawl، ضعیف‌ترین صفحات اینجا می‌آیند.</small></div>`;
     $(".donut span").innerHTML = "—<small>بدون داده</small>";
     $(".donut-legend").innerHTML = `<li>پوشش موضوعی پس از crawl واقعی ساخته می‌شود.</li>`;
+    if ($("#articleCount")) $("#articleCount").textContent = "—";
+    if ($("#articleWords")) $("#articleWords").textContent = "—";
+    if ($("#articleCategories")) $("#articleCategories").textContent = "—";
+    if ($("#articleBody")) $("#articleBody").innerHTML = `<tr><td colspan="6"><div class="data-empty"><b>پس از crawl، مقاله‌های شناسایی‌شده اینجا می‌آیند.</b><small>تشخیص از داده واقعی HTML و JSON-LD انجام می‌شود.</small></div></td></tr>`;
     $(".technical-banner b").textContent = "آماده بررسی واقعی";
     $(".technical-banner p").textContent = "هنوز robots، sitemap یا صفحه‌ای دریافت نشده است.";
     $(".banner-score").innerHTML = "—<span>/۱۰۰</span>";
@@ -564,7 +659,7 @@
     $$(".vitals span").forEach(node => { node.textContent = "بدون داده"; });
     $(".opportunities").innerHTML = `<div class="panel-heading"><div><h3>فرصت‌های سرعت</h3><p>پس از دریافت پاسخ Google</p></div></div><div class="data-empty"><b>هنوز تستی اجرا نشده است.</b></div>`;
     $(".recommendation-banner p").textContent = "پس از تست واقعی Google، این بخش فقط توصیه‌های برگرفته از همان پاسخ را نشان می‌دهد.";
-    if (!$("#scanProgress")) $(".scan-form").insertAdjacentHTML("beforeend", `<div id="scanProgress" class="crawl-progress"><div><span id="scanStatus">آماده تحلیل واقعی</span><b>سقف crawl: <select id="crawlLimit"><option value="10">۱۰</option><option value="20" selected>۲۰</option><option value="40">۴۰</option></select> صفحه</b></div><i><em id="scanProgressBar"></em></i></div>`);
+    if (!$("#scanProgress")) $(".scan-form").insertAdjacentHTML("beforeend", `<div id="scanProgress" class="crawl-progress"><div><span id="scanStatus">آماده تحلیل واقعی</span><b>سقف crawl: <select id="crawlLimit"><option value="100" selected>۱۰۰</option><option value="250">۲۵۰</option><option value="500">۵۰۰</option><option value="1000">۱۰۰۰</option></select> صفحه</b></div><i><em id="scanProgressBar"></em></i></div>`);
   };
 
   document.addEventListener("click", event => {
@@ -590,7 +685,9 @@
     if (name === "keyword") openKeywordTool();
     if (name === "brief") openBriefTool();
     if (name === "competitor") openCompetitorTool();
-    if (name === "settings") openModal("تنظیمات و منابع داده", `<p>منابع فعال این نسخه:</p><ul class="tool-list"><li>HTML از مسیر واسط عمومی برای crawl</li><li>Google PageSpeed Insights برای Lighthouse</li><li>ذخیره گزارش در همین مرورگر</li></ul><p class="tool-source">برای crawl بدون واسط و Search Console/GA4 باید یک API امن سمت سرور اضافه شود.</p>`);
+     if (name === "settings") openSettings();
+     if (name === "export-articles-csv") exportArticles("csv");
+     if (name === "export-articles-json") exportArticles("json");
     if (name === "all-history") openModal("آرشیو تحلیل‌ها", `<div class="tool-output">${JSON.parse(localStorage.getItem("orbit-history-v2") || "[]").map(item => `<p><b>${esc(item.url)}</b><br><small>${fa(item.score)} · ${new Date(item.checkedAt).toLocaleString("fa-IR")}</small></p>`).join("") || "هنوز گزارشی ذخیره نشده است."}</div>`);
     if (name === "fixes") goTo("technical");
     if (name === "recrawl") { goTo("dashboard"); $("#siteUrl").focus(); }
@@ -607,8 +704,15 @@
       const keyword = $("#briefKeyword").value.trim() || page?.h1?.[0] || "موضوع اصلی";
       $("#toolOutput").innerHTML = `<div class="brief-result"><b>بریف ${esc(keyword)}</b><p>عنوان پیشنهادی: ${esc(keyword)} | راهنمای کامل، کاربردی و به‌روز</p><p>ساختار پیشنهادی: مقدمه · تعریف مسئله · مقایسه راهکارها · مراحل اجرا · FAQ · CTA</p><p>پوشش فعلی صفحه: ${fa(page?.words || 0)} کلمه · ${fa(page?.headings?.length || 0)} زیرعنوان · ${page?.schema ? "Schema دارد" : "Schema ندارد"}</p></div>`;
     }
-    if (event.target.id === "competitorRun") runCompetitor();
-  });
+     if (event.target.id === "competitorRun") runCompetitor();
+     if (event.target.id === "savePsiKey") {
+       const key = $("#psiApiKey")?.value.trim() || "";
+       if (key) localStorage.setItem(psiKeyStorage, key);
+       else localStorage.removeItem(psiKeyStorage);
+       closeModal();
+       toast(key ? "کلید PageSpeed فقط روی همین مرورگر ذخیره شد" : "کلید PageSpeed پاک شد");
+     }
+   });
 
   $("#scanForm").addEventListener("submit", runScan);
   $$(".device-tabs button").forEach(button => button.addEventListener("click", () => {
