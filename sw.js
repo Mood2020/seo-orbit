@@ -1,4 +1,4 @@
-const CACHE = "orbit-seo-v2";
+const CACHE = "orbit-seo-v3";
 const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest", "./assets/icon.svg"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(APP_SHELL)));
@@ -10,6 +10,15 @@ self.addEventListener("activate", event => {
 });
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET" || !event.request.url.startsWith(self.location.origin)) return;
+  const type = event.request.destination;
+  if (["document", "script", "style"].includes(type)) {
+    event.respondWith(fetch(event.request).then(response => {
+      const clone = response.clone();
+      caches.open(CACHE).then(cache => cache.put(event.request, clone));
+      return response;
+    }).catch(() => caches.match(event.request).then(cached => cached || caches.match("./index.html"))));
+    return;
+  }
   event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request).then(response => {
     const clone = response.clone();
     caches.open(CACHE).then(cache => cache.put(event.request, clone));
